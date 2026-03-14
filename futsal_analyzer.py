@@ -117,178 +117,147 @@ def open_youtube_stream(url: str, config: Config) -> Optional[cv2.VideoCapture]:
     return None
 
 
-# ===================== FIELD CALIBRATION =====================
-
 class FieldCalibrator:
     """
     Sistema de calibración por rectángulo ajustable para definir los límites del campo.
     Permite dibujar y ajustar un rectángulo que representa el área del futsal.
-    NO RECORTA LA IMAGEN - Trabaja con resolución original.
     """
     
-    def __init__(self, frame: np.ndarray, config: Config):
-        """Inicializa el calibrador sin modificar la imagen."""
-        self.frame = frame.copy()
+    def __init__(self, frame: np.ndarray):
+        """Inicializa el calibrador."""
+        self.original_frame = frame.copy()
         self.h, self.w = frame.shape[:2]
         
         # Inicializar rectángulo por defecto (área central del frame)
         margin = max(100, int(min(self.w, self.h) * 0.1))
-        self.rect = {
-            'x1': margin,
-            'y1': margin,
-            'x2': self.w - margin,
-            'y2': self.h - margin
-        }
+        self.x1 = margin
+        self.y1 = margin
+        self.x2 = self.w - margin
+        self.y2 = self.h - margin
         
-        self.dragging = False
-        self.handle = None
-        self.WIN = "CALIBRACIÓN DE CAMPO - Ajusta el Rectángulo"
+        self.dragging_handle = None
+        self.WIN = "Calibración de Campo"
     
-    def normalize_rect(self):
-        """Asegurar que x1 < x2 y y1 < y2."""
-        if self.rect['x1'] > self.rect['x2']:
-            self.rect['x1'], self.rect['x2'] = self.rect['x2'], self.rect['x1']
-        if self.rect['y1'] > self.rect['y2']:
-            self.rect['y1'], self.rect['y2'] = self.rect['y2'], self.rect['y1']
-        
-        # Limitaciones de límites
-        self.rect['x1'] = max(0, min(self.rect['x1'], self.w - 1))
-        self.rect['x2'] = max(0, min(self.rect['x2'], self.w - 1))
-        self.rect['y1'] = max(0, min(self.rect['y1'], self.h - 1))
-        self.rect['y2'] = max(0, min(self.rect['y2'], self.h - 1))
-    
-    def draw_overlay(self) -> np.ndarray:
-        """Dibuja el rectángulo y las instrucciones sin recortar."""
-        img = self.frame.copy()
+    def draw_frame(self) -> np.ndarray:
+        """Dibuja el frame con el rectángulo."""
+        img = self.original_frame.copy()
         
         # Oscurecer área fuera del rectángulo
         overlay = img.copy()
         cv2.rectangle(overlay, (0, 0), (self.w, self.h), (0, 0, 0), -1)
-        cv2.rectangle(overlay, 
-                     (self.rect['x1'], self.rect['y1']),
-                     (self.rect['x2'], self.rect['y2']),
-                     (0, 100, 0), -1)
-        cv2.addWeighted(overlay, 0.4, img, 0.6, 0, img)
+        cv2.rectangle(overlay, (self.x1, self.y1), (self.x2, self.y2), (0, 100, 0), -1)
+        cv2.addWeighted(overlay, 0.3, img, 0.7, 0, img)
         
-        # Dibujar rectángulo principal - línea verde gruesa
-        cv2.rectangle(img,
-                     (self.rect['x1'], self.rect['y1']),
-                     (self.rect['x2'], self.rect['y2']),
-                     (0, 255, 0), 4)
+        # Dibujar rectángulo principal
+        cv2.rectangle(img, (self.x1, self.y1), (self.x2, self.y2), (0, 255, 0), 4)
         
-        # Dibujar asas de ajuste - esquinas interactivas
-        handle_size = 15
+        # Dibujar asas (esquinas) grandes
+        handle_size = 20
         handles = [
-            (self.rect['x1'], self.rect['y1']),  # arriba-izquierda
-            (self.rect['x2'], self.rect['y1']),  # arriba-derecha
-            (self.rect['x2'], self.rect['y2']),  # abajo-derecha
-            (self.rect['x1'], self.rect['y2']),  # abajo-izquierda
+            (self.x1, self.y1),
+            (self.x2, self.y1),
+            (self.x2, self.y2),
+            (self.x1, self.y2),
         ]
         for x, y in handles:
             cv2.circle(img, (x, y), handle_size, (0, 255, 255), -1)
             cv2.circle(img, (x, y), handle_size + 2, (255, 255, 255), 2)
         
-        # Superposición de instrucciones
-        overlay = img.copy()
-        cv2.rectangle(overlay, (0, 0), (self.w, 140), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.5, img, 0.5, 0, img)
-        
-        # Texto
-        cv2.putText(img, "CALIBRACIÓN DE CAMPO", (20, 35),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
-        cv2.putText(img, "Arrastra las esquinas (puntos amarillos) para ajustar el rectángulo", (20, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
-        cv2.putText(img, "ESPACIO: Confirmar  |  R: Resetear  |  ESC: Cancelar", (20, 115),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 255, 100), 2)
-        
         return img
     
-    def get_handle_at(self, x: int, y: int) -> Optional[str]:
-        """Obtener qué asa está siendo arrastrada."""
-        threshold = 20
-        handles = {
-            'tl': (self.rect['x1'], self.rect['y1']),
-            'tr': (self.rect['x2'], self.rect['y1']),
-            'br': (self.rect['x2'], self.rect['y2']),
-            'bl': (self.rect['x1'], self.rect['y2']),
-        }
-        for name, (hx, hy) in handles.items():
-            if abs(x - hx) < threshold and abs(y - hy) < threshold:
-                return name
-        return None
+    def get_nearest_handle(self, x: int, y: int, threshold: int = 30) -> Optional[int]:
+        """Obtener qué esquina está más cerca del click."""
+        handles = [
+            (self.x1, self.y1, 0),
+            (self.x2, self.y1, 1),
+            (self.x2, self.y2, 2),
+            (self.x1, self.y2, 3),
+        ]
+        
+        min_dist = float('inf')
+        closest_handle = None
+        
+        for hx, hy, idx in handles:
+            dist = np.sqrt((x - hx)**2 + (y - hy)**2)
+            if dist < threshold and dist < min_dist:
+                min_dist = dist
+                closest_handle = idx
+        
+        return closest_handle
     
-    def on_mouse(self, event, x, y, flags, param):
-        """Callback del mouse completamente reactivo."""
+    def mouse_callback(self, event, x, y, flags, param):
+        """Callback para eventos del ratón."""
         if event == cv2.EVENT_LBUTTONDOWN:
-            handle = self.get_handle_at(x, y)
-            if handle:
-                self.dragging = True
-                self.handle = handle
-                logger.debug(f"Comenzado arrastrar {handle}")
+            handle_idx = self.get_nearest_handle(x, y)
+            if handle_idx is not None:
+                self.dragging_handle = handle_idx
+                print(f"Esquina {handle_idx} seleccionada")
         
         elif event == cv2.EVENT_MOUSEMOVE:
-            if self.dragging and self.handle:
-                if self.handle == 'tl':
-                    self.rect['x1'], self.rect['y1'] = x, y
-                elif self.handle == 'tr':
-                    self.rect['x2'], self.rect['y1'] = x, y
-                elif self.handle == 'br':
-                    self.rect['x2'], self.rect['y2'] = x, y
-                elif self.handle == 'bl':
-                    self.rect['x1'], self.rect['y2'] = x, y
-                self.normalize_rect()
+            if self.dragging_handle is not None:
+                if self.dragging_handle == 0:
+                    self.x1 = max(0, min(x, self.x2 - 50))
+                    self.y1 = max(0, min(y, self.y2 - 50))
+                elif self.dragging_handle == 1:
+                    self.x2 = max(self.x1 + 50, min(x, self.w))
+                    self.y1 = max(0, min(y, self.y2 - 50))
+                elif self.dragging_handle == 2:
+                    self.x2 = max(self.x1 + 50, min(x, self.w))
+                    self.y2 = max(self.y1 + 50, min(y, self.h))
+                elif self.dragging_handle == 3:
+                    self.x1 = max(0, min(x, self.x2 - 50))
+                    self.y2 = max(self.y1 + 50, min(y, self.h))
         
         elif event == cv2.EVENT_LBUTTONUP:
-            if self.dragging:
-                logger.debug(f"Finalizado arrastrar {self.handle}")
-            self.dragging = False
-            self.handle = None
+            self.dragging_handle = None
     
     def calibrate(self) -> np.ndarray:
-        """Ejecutar la interfaz de calibración completamente reactiva."""
-        logger.info("="*70)
-        logger.info(" "*10 + "CALIBRACIÓN DE CAMPO - FUTSAL")
-        logger.info("="*70)
-        logger.info("Instrucciones:")
-        logger.info("  1. Los puntos amarillos en las esquinas son ARRASTABLES")
-        logger.info("  2. Arrastra cada esquina hasta los límites reales del campo")
-        logger.info("  3. Puedes mover el rectángulo fuera de la imagen si lo necesitas")
-        logger.info("  4. Presiona ESPACIO cuando hayas terminado")
-        logger.info("  5. Presiona R para resetear a los valores por defecto")
-        logger.info("="*70 + "\n")
+        """Ejecutar la interfaz de calibración."""
+        print("\n" + "="*70)
+        print("CALIBRACIÓN DE CAMPO - FUTSAL")
+        print("="*70)
+        print("\nInstrucciones:")
+        print("  1. Haz CLIC en los puntos amarillos (esquinas del rectángulo)")
+        print("  2. ARRASTRA cada esquina hasta los límites reales del campo")
+        print("  3. Puedes mover el rectángulo fuera de los límites si es necesario")
+        print("  4. Los puntos amarillos se ajustarán en tiempo real mientras arrastras")
+        print("\nControles:")
+        print("  - CLIC + ARRASTRAR en las esquinas (puntos amarillos) para ajustar")
+        print("  - ESPACIO para confirmar")
+        print("  - R para resetear a valores por defecto")
+        print("  - ESC para cancelar")
+        print("="*70 + "\n")
         
-        cv2.namedWindow(self.WIN, cv2.WINDOW_NORMAL)
-        cv2.setMouseCallback(self.WIN, self.on_mouse)
+        cv2.namedWindow(self.WIN, cv2.WINDOW_AUTOSIZE)
+        cv2.setMouseCallback(self.WIN, self.mouse_callback)
         
         while True:
-            img = self.draw_overlay()
+            img = self.draw_frame()
             cv2.imshow(self.WIN, img)
             
             key = cv2.waitKey(30) & 0xFF
-            if key == ord(' '):  # ESPACIO
-                logger.info("✓ Calibración confirmada\n")
+            
+            if key == ord(' '):
+                print("\n✓ Calibración confirmada")
                 break
-            elif key == ord('r') or key == ord('R'):  # R para resetear
+            elif key == ord('r') or key == ord('R'):
                 margin = max(100, int(min(self.w, self.h) * 0.1))
-                self.rect = {
-                    'x1': margin,
-                    'y1': margin,
-                    'x2': self.w - margin,
-                    'y2': self.h - margin
-                }
-                logger.info("Rectángulo reseteado a valores por defecto")
-            elif key == 27:  # ESC
-                logger.warning("Calibración cancelada")
+                self.x1 = margin
+                self.y1 = margin
+                self.x2 = self.w - margin
+                self.y2 = self.h - margin
+                print("Rectángulo reseteado a valores por defecto")
+            elif key == 27:
+                print("\n✗ Calibración cancelada")
                 break
         
         cv2.destroyAllWindows()
         
-        # Retornar los puntos en formato array
         return np.array([
-            [self.rect['x1'], self.rect['y1']],
-            [self.rect['x2'], self.rect['y1']],
-            [self.rect['x2'], self.rect['y2']],
-            [self.rect['x1'], self.rect['y2']],
+            [self.x1, self.y1],
+            [self.x2, self.y1],
+            [self.x2, self.y2],
+            [self.x1, self.y2],
         ], dtype=np.float32)
 
 
@@ -880,7 +849,7 @@ def main(cfg: Optional[Config] = None) -> None:
         return
 
     # Calibración con rectángulo
-    calibrator = FieldCalibrator(first_frame.copy(), cfg)
+    calibrator = FieldCalibrator(first_frame.copy())
     field_rect = calibrator.calibrate()
     
     if len(field_rect) != 4:
