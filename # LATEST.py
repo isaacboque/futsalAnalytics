@@ -1,0 +1,941 @@
+"""
+Football Match Analysis System
+Extracts tactical and performance metrics from YouTube stream videos using YOLO detection,
+team classification, perspective transformation, and KPI computation.
+"""
+
+import cv2
+import numpy as np
+import supervision as sv
+from ultralytics import YOLO
+from sklearn.cluster import KMeans
+from collections import defaultdict, deque
+import csv
+import time
+import os
+import subprocess
+import sys
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Tuple, List, Dict, Any
+
+# ===================== LOGGING SETUP =====================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(levelname)s] %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+
+# ===================== CONFIGURATION CLASS =====================
+
+@dataclass
+class Config:
+    """Centralized configuration for the analysis system."""
+    model_name: str = "yolo11n.pt"
+    board_width: int = 800
+    board_height: int = 400
+    max_display_width: int = 1280
+    num_calib_points: int = 6
+    
+    player_class_id: int = 0
+    ball_class_id: int = 32
+    
+    min_players_for_train: int = 8
+    min_players_for_kmeans: int = 6
+    
+    smoothing_window: int = 5       # Frames for position smoothing
+    duel_radius_px: int = 40        # Board-pixels: duel proximity threshold
+    possession_radius_px: int = 50  # Board-pixels: ball possession threshold
+    
+    yolo_conf_threshold: float = 0.3
+    track_activation_threshold: float = 0.25
+    
+    output_csv: str = "match_data.csv"
+    stream_read_retries: int = 30
+    stream_read_delay: float = 0.3
+    yt_dlp_timeout: int = 30
+    
+    def __post_init__(self):
+        """Validate configuration values."""
+        if self.board_width <= 0 or self.board_height <= 0:
+            raise ValueError("Board dimensions must be positive")
+        if self.smoothing_window < 1:
+            raise ValueError("Smoothing window must be >= 1")
+
+
+# For backward compatibility
+config = Config()
+
+
+# ===================== YOUTUBE STREAM =====================
+
+def open_youtube_stream(url: str, config: Config) -> Optional[cv2.VideoCapture]:
+    """
+    Opens a YouTube video as an OpenCV VideoCapture by extracting the direct
+    stream URL via yt-dlp. Tries 720p, 480p, 360p in order.
+    
+    Args:
+        url: YouTube video URL
+        config: Configuration object with timeout settings
+        
+    Returns:
+        cv2.VideoCapture if successful, None otherwise.
+    """
+    formats = ["best[height<=720]", "best[height<=480]", "best[height<=360]"]
+    
+    for fmt in formats:
+        try:
+            result = subprocess.run(
+                ["yt-dlp", "-f", fmt, "--get-url", url],
+                capture_output=True,
+                text=True,
+                timeout=config.yt_dlp_timeout
+            )
+            
+            if result.returncode != 0:
+                logger.warning(f"yt-dlp failed for {fmt}: {result.stderr.strip()[:120]}")
+                continue
+            
+            stream_url = result.stdout.strip().split("\n")[0]
+            if not stream_url:
+                continue
+            
+            cap = cv2.VideoCapture(stream_url)
+            if cap.isOpened():
+                logger.info(f"Stream opened successfully ({fmt})")
+                return cap
+            cap.release()
+            
+        except FileNotFoundError:
+            logger.error("yt-dlp not found. Install with: pip install yt-dlp")
+            return None
+        except subprocess.TimeoutExpired:
+            logger.warning(f"yt-dlp timeout for {fmt}")
+    
+    logger.error("Failed to open stream with any format")
+    return None
+
+
+# ===================== TEAM CLASSIFIER =====================
+
+# ===================== TEAM CLASSIFIER =====================
+
+class TeamClassifier:
+    """
+    Separates players into two teams using K-Means clustering on jersey colour.
+
+    Uses HSV colour space instead of BGR: hue is consistent under varying
+    lighting conditions, making classification more robust to shadows and
+    brightness differences across the pitch.
+
+    Uses 3 clusters (not 2) to account for the referee, whose jersey colour
+    typically differs from both teams. The smallest cluster is identified as
+    the referee and assigned team ID -1, excluding it from all KPI computation.
+    
+    Attributes:
+        kmeans: KMeans clusterer instance
+        trained: Whether classification model has been fitted
+        ref_label: Cluster label assigned to the referee
+    """
+
+    def __init__(self, n_clusters: int = 3, n_init: int = 10):
+        """Initialize the classifier with default hyperparameters."""
+        self.kmeans: KMeans = KMeans(n_clusters=n_clusters, n_init=n_init, random_state=42)
+        self.trained: bool = False
+        self.ref_label: Optional[int] = None
+
+    @staticmethod
+    def _safe_crop(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> np.ndarray:
+        """Safely crop a region from frame with boundary clipping."""
+        h, w = frame.shape[:2]
+        x1, x2 = max(0, min(x1, w - 1)), max(0, min(x2, w - 1))
+        y1, y2 = max(0, min(y1, h - 1)), max(0, min(y2, h - 1))
+        if x2 <= x1 or y2 <= y1:
+            return np.zeros((1, 1, 3), dtype=frame.dtype)
+        return frame[y1:y2, x1:x2]
+
+    def get_jersey_color(self, frame: np.ndarray, bbox: np.ndarray) -> np.ndarray:
+        """
+        Extract mean HSV colour of the upper 40% of the bounding box (shirt region).
+        
+        Args:
+            frame: Input image frame
+            bbox: Bounding box [x1, y1, x2, y2]
+            
+        Returns:
+            HSV color vector as float32 array
+        """
+        x1, y1, x2, y2 = map(int, bbox)
+        jersey_h = int((y2 - y1) * 0.4)
+        crop = self._safe_crop(frame, x1, y1, x2, y1 + jersey_h)
+        
+        if crop.size == 0:
+            return np.array([0, 0, 0], dtype=np.float32)
+        
+        return np.mean(cv2.cvtColor(crop, cv2.COLOR_BGR2HSV), axis=(0, 1)).astype(np.float32)
+
+    def train_teams(self, frame: np.ndarray, detections: sv.Detections, config: Config) -> bool:
+        """
+        Fit K-Means clustering on all detected players' jersey colours.
+        Referee cluster is identified as the smallest population.
+        
+        Args:
+            frame: Input image frame
+            detections: Supervision detections object
+            config: Configuration object
+            
+        Returns:
+            True if training succeeded, False otherwise
+        """
+        if len(detections) < config.min_players_for_kmeans:
+            return False
+        
+        try:
+            colors = np.array(
+                [self.get_jersey_color(frame, b) for b in detections.xyxy],
+                dtype=np.float32
+            )
+            
+            # Skip if all colors are identical (no variation)
+            if np.allclose(colors.max(axis=0), colors.min(axis=0)):
+                logger.warning("All players have identical jersey colors - skipping training")
+                return False
+            
+            self.kmeans.fit(colors)
+            self.trained = True
+            counts = np.bincount(self.kmeans.labels_)
+            self.ref_label = int(np.argmin(counts))
+            
+            logger.info(f"Team classifier trained. Referee cluster: {self.ref_label} (cluster sizes: {counts})")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error during team training: {e}")
+            return False
+
+    def predict_team(self, frame: np.ndarray, bbox: np.ndarray) -> int:
+        """
+        Predict team ID for a player's bounding box.
+        
+        Args:
+            frame: Input image frame
+            bbox: Player bounding box
+            
+        Returns:
+            0 or 1 for team players, -1 for referee
+        """
+        if not self.trained:
+            return 0
+        
+        try:
+            label = int(self.kmeans.predict(
+                self.get_jersey_color(frame, bbox).reshape(1, -1)
+            )[0])
+            
+            if label == self.ref_label:
+                return -1
+            
+            team_labels = [l for l in range(self.kmeans.n_clusters) if l != self.ref_label]
+            return team_labels.index(label) if label in team_labels else 0
+            
+        except Exception as e:
+            logger.warning(f"Error predicting team: {e}")
+            return 0
+
+
+# ===================== POSITION SMOOTHER =====================
+
+class PositionSmoother:
+    """
+    Rolling average over the last N frames per player.
+    Eliminates jitter from frame-to-frame detection noise on the tactical board.
+    
+    Attributes:
+        buffers: Dictionary mapping track_id to deque of positions
+    """
+
+    def __init__(self, window: int = 5):
+        """
+        Initialize with smoothing window size.
+        
+        Args:
+            window: Number of frames to average over
+        """
+        self.buffers: Dict[int, deque] = defaultdict(lambda: deque(maxlen=window))
+
+    def update(self, track_id: int, pos: np.ndarray) -> np.ndarray:
+        """
+        Add position for a player and return smoothed position.
+        
+        Args:
+            track_id: Unique player identifier
+            pos: Position vector [x, y]
+            
+        Returns:
+            Smoothed position (rolling average)
+        """
+        self.buffers[track_id].append(pos)
+        return np.mean(self.buffers[track_id], axis=0)
+
+
+# ===================== KPI TRACKER =====================
+
+# ===================== KPI TRACKER =====================
+
+class KPITracker:
+    """
+    Accumulates per-player KPIs across all processed frames:
+
+    - Distance covered  (board-pixel displacement converted to metres)
+    - Duels             (frames where two opposing players are within DUEL_RADIUS_PX)
+    - Possession time   (seconds as the player closest to the ball)
+    - Sprint count      (frames where speed exceeds ~7 m/s threshold)
+
+    Scale: 800px board = 40m real pitch width  =>  1px = 0.05m
+    
+    Attributes:
+        distance: Cumulative distance per player (metres)
+        duels: Count of frames in duels per player
+        possession: Count of possession frames per player
+        sprints: Count of sprint events per player
+        prev_pos: Previous position per player for delta calculation
+        team_map: Team assignment per player
+    """
+
+    BOARD_TO_METRES: float = 40.0 / 800.0  # metres per board-pixel
+
+    def __init__(self):
+        """Initialize KPI tracking dictionaries."""
+        self.distance: Dict[int, float] = defaultdict(float)
+        self.duels: Dict[int, int] = defaultdict(int)
+        self.possession: Dict[int, int] = defaultdict(int)
+        self.sprints: Dict[int, int] = defaultdict(int)
+        self.prev_pos: Dict[int, np.ndarray] = {}
+        self.team_map: Dict[int, int] = {}
+
+    def update(self, players: List[Tuple[int, np.ndarray, int]], 
+               ball_pos: Optional[np.ndarray], 
+               fps: float,
+               config: Config) -> None:
+        """
+        Update KPI accumulators with frame data.
+        
+        Args:
+            players: List of (track_id, position, team_id) tuples
+            ball_pos: Ball position or None
+            fps: Frames per second of video
+            config: Configuration object with radius parameters
+        """
+        if fps <= 0:
+            logger.warning("Invalid FPS value")
+            return
+        
+        # Sprints threshold: ~7 m/s
+        sprint_px = (7.0 / self.BOARD_TO_METRES) / fps
+
+        # Track distance and sprints
+        for track_id, pos, team_id in players:
+            self.team_map[track_id] = team_id
+            
+            if track_id in self.prev_pos:
+                d = float(np.linalg.norm(pos - self.prev_pos[track_id]))
+                self.distance[track_id] += d * self.BOARD_TO_METRES
+                
+                if d > sprint_px:
+                    self.sprints[track_id] += 1
+            
+            self.prev_pos[track_id] = pos.copy()
+
+        # Track duels (opposing players within radius)
+        for i, (id_a, pos_a, team_a) in enumerate(players):
+            for id_b, pos_b, team_b in players[i + 1:]:
+                if team_a >= 0 and team_b >= 0 and team_a != team_b:
+                    if np.linalg.norm(pos_a - pos_b) < config.duel_radius_px:
+                        self.duels[id_a] += 1
+                        self.duels[id_b] += 1
+
+        # Track possession (closest player to ball)
+        if ball_pos is not None and players:
+            try:
+                closest = min(players, key=lambda p: np.linalg.norm(p[1] - ball_pos))
+                if np.linalg.norm(closest[1] - ball_pos) < config.possession_radius_px:
+                    self.possession[closest[0]] += 1
+            except (ValueError, IndexError):
+                pass
+
+    def get_summary(self, fps: float) -> Dict[int, Dict[str, Any]]:
+        """
+        Generate KPI summary dictionary for all tracked players.
+        
+        Args:
+            fps: Frames per second for converting frames to seconds
+            
+        Returns:
+            Dictionary mapping track_id to KPI dictionary
+        """
+        return {
+            tid: {
+                "team": self.team_map.get(tid, -1),
+                "distance_m": round(self.distance[tid], 2),
+                "duel_frames": self.duels[tid],
+                "possession_s": round(self.possession[tid] / max(fps, 1), 2),
+                "sprint_count": self.sprints[tid],
+            }
+            for tid in self.team_map
+        }
+
+    def export_csv(self, path: str, fps: float) -> bool:
+        """
+        Export KPI summary to CSV file.
+        
+        Args:
+            path: Output file path
+            fps: Frames per second for time conversion
+            
+        Returns:
+            True if export succeeded, False otherwise
+        """
+        try:
+            summary = self.get_summary(fps)
+            if not summary:
+                logger.warning("No KPI data to export")
+                return False
+            
+            fields = ["track_id", "team", "distance_m", "duel_frames", "possession_s", "sprint_count"]
+            
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=fields)
+                w.writeheader()
+                for tid, kpis in summary.items():
+                    w.writerow({"track_id": tid, **kpis})
+            
+            logger.info(f"KPIs exported to: {os.path.abspath(path)}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error exporting KPI CSV: {e}")
+            return False
+
+
+# ===================== PERSPECTIVE TRANSFORMER =====================
+
+# ===================== PERSPECTIVE TRANSFORMER =====================
+
+class PiecewiseTransformer:
+    """
+    Maps camera pixel coordinates to a flat 2D board using two homographies:
+    one for the left half of the pitch, one for the right.
+
+    A single homography cannot accurately correct the non-uniform perspective
+    distortion of a wide-angle fixed camera. Splitting at the halfway line and
+    computing independent transforms for each half significantly improves
+    positional accuracy near the edges of the frame.
+    
+    Attributes:
+        m_left: Homography matrix for left half of pitch
+        m_right: Homography matrix for right half of pitch
+        midline_x: X-coordinate of field midline in camera space
+    """
+
+    def __init__(self, src_pts: np.ndarray, board_width: int, board_height: int):
+        """
+        Initialize perspective transformer.
+        
+        Args:
+            src_pts: Array of 6 calibration points:
+                    [top_left, top_right, bottom_right, bottom_left, 
+                     midline_top, midline_bottom]
+            board_width: Tactical board width in pixels
+            board_height: Tactical board height in pixels
+        """
+        if len(src_pts) != 6:
+            raise ValueError("Need exactly 6 calibration points")
+        
+        tl, tr, br, bl, mt, mb = src_pts
+        mid = board_width // 2
+        
+        # Left half: TL -> MT -> MB -> BL
+        self.m_left = cv2.getPerspectiveTransform(
+            np.array([tl, mt, mb, bl], dtype=np.float32),
+            np.array([[0, 0], [mid, 0], [mid, board_height], [0, board_height]], dtype=np.float32)
+        )
+        
+        # Right half: MT -> TR -> BR -> MB
+        self.m_right = cv2.getPerspectiveTransform(
+            np.array([mt, tr, br, mb], dtype=np.float32),
+            np.array([[mid, 0], [board_width, 0], [board_width, board_height], [mid, board_height]], dtype=np.float32)
+        )
+        
+        self.midline_x: float = float((mt[0] + mb[0]) / 2.0)
+        logger.info(f"Perspective transformer initialized (midline at x={self.midline_x:.1f})")
+
+    def transform(self, pt: np.ndarray) -> np.ndarray:
+        """
+        Transform a camera-space point to board-space coordinates.
+        
+        Args:
+            pt: Point [x, y] in camera space
+            
+        Returns:
+            Transformed point [x, y] in board space
+        """
+        if pt[0] < 0 or pt[1] < 0:
+            return pt
+        
+        mat = self.m_left if pt[0] < self.midline_x else self.m_right
+        return cv2.perspectiveTransform(np.array([[pt]], dtype=np.float32), mat)[0][0]
+
+
+# ===================== TACTICAL BOARD =====================
+
+# ===================== TACTICAL BOARD =====================
+
+class TacticalBoard:
+    """
+    Renders a 2D overhead pitch diagram with players, ball, and KPI overlay.
+    
+    Attributes:
+        width: Board width in pixels
+        height: Board height in pixels
+        team_colors: Color tuple for each team in BGR format
+    """
+
+    # Team colors (BGR): Blue, Yellow
+    TEAM_COLORS: Tuple[Tuple[int, int, int], Tuple[int, int, int]] = ((255, 80, 80), (80, 255, 255))
+    PITCH_COLOR: Tuple[int, int, int] = (34, 139, 34)  # Dark green
+
+    def __init__(self, width: int, height: int):
+        """Initialize tactical board with given dimensions."""
+        self.width: int = width
+        self.height: int = height
+
+    def _draw_pitch(self, board: np.ndarray) -> None:
+        """Draw pitch markings on the tactical board."""
+        # Pitch boundary
+        cv2.rectangle(board, (0, 0), (self.width - 1, self.height - 1), (255, 255, 255), 3)
+        
+        # Halfway line
+        cv2.line(board, (self.width // 2, 0), (self.width // 2, self.height), (255, 255, 255), 2)
+        
+        # Centre spot
+        cv2.circle(board, (self.width // 2, self.height // 2), 50, (255, 255, 255), 2)
+        
+        # Penalty areas
+        pa_w, pa_h = 120, 220
+        cy = self.height // 2
+        
+        # Left penalty area
+        cv2.rectangle(board, (0, cy - pa_h // 2), (pa_w, cy + pa_h // 2), (200, 200, 200), 1)
+        
+        # Right penalty area
+        cv2.rectangle(board, (self.width - pa_w, cy - pa_h // 2),
+                      (self.width, cy + pa_h // 2), (200, 200, 200), 1)
+
+    def draw_state(self, 
+                   players: List[Tuple[int, np.ndarray, int]], 
+                   ball_mapped: Optional[np.ndarray],
+                   kpi_tracker: Optional['KPITracker'] = None, 
+                   fps: float = 25.0) -> np.ndarray:
+        """
+        Draw the current match state on the tactical board.
+        
+        Args:
+            players: List of (track_id, position, team_id) tuples
+            ball_mapped: Ball position or None
+            kpi_tracker: KPI tracker instance for distance overlay
+            fps: Frames per second (for reference)
+            
+        Returns:
+            Rendered board image (numpy array)
+        """
+        # Initialize board with pitch color
+        board = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        board[:] = self.PITCH_COLOR
+        
+        # Draw pitch markings
+        self._draw_pitch(board)
+
+        # Draw players
+        for track_id, pos, team_id in players:
+            if team_id < 0:  # Skip referee
+                continue
+            
+            # Clip to board boundaries
+            x = int(np.clip(pos[0], 5, self.width - 5))
+            y = int(np.clip(pos[1], 5, self.height - 5))
+            
+            # Team color
+            color = self.TEAM_COLORS[team_id % len(self.TEAM_COLORS)]
+            
+            # Draw player circle and outline
+            cv2.circle(board, (x, y), 10, color, -1)
+            cv2.circle(board, (x, y), 11, (255, 255, 255), 1)
+            
+            # Draw player ID
+            cv2.putText(board, str(track_id), (x + 13, y + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            
+            # Draw distance if available
+            if kpi_tracker and track_id in kpi_tracker.distance:
+                d = kpi_tracker.distance[track_id]
+                cv2.putText(board, f"{d:.0f}m", (x + 13, y + 17),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 255, 200), 1)
+
+        # Draw ball
+        if ball_mapped is not None:
+            bx = int(np.clip(ball_mapped[0], 3, self.width - 3))
+            by = int(np.clip(ball_mapped[1], 3, self.height - 3))
+            cv2.circle(board, (bx, by), 7, (0, 165, 255), -1)
+            cv2.circle(board, (bx, by), 8, (255, 255, 255), 1)
+
+        return board
+
+
+# ===================== FIELD CALIBRATION =====================
+
+# ===================== FIELD CALIBRATION =====================
+
+def select_points(frame: np.ndarray, config: Config) -> np.ndarray:
+    """
+    Shows the first video frame and lets the user click calibration points.
+    
+    Click order:
+        1=Top-Left  2=Top-Right  3=Bottom-Right  4=Bottom-Left
+        5=Halfway-Line Top  6=Halfway-Line Bottom
+    
+    Args:
+        frame: First frame of video
+        config: Configuration with display settings
+        
+    Returns:
+        Array of points in original video resolution (shape: 6x2)
+    """
+    h, w = frame.shape[:2]
+    scale = config.max_display_width / w if w > config.max_display_width else 1.0
+    disp = cv2.resize(frame, (int(w * scale), int(h * scale)))
+    pts: List[List[int]] = []
+    WIN = "Field Calibration"
+
+    def on_click(event, x, y, flags, param) -> None:
+        """Mouse callback for point selection."""
+        if event == cv2.EVENT_LBUTTONDOWN and len(pts) < config.num_calib_points:
+            pts.append([int(x / scale), int(y / scale)])
+            cv2.circle(disp, (x, y), 6, (0, 0, 255), -1)
+            cv2.putText(disp, str(len(pts)), (x + 8, y - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.imshow(WIN, disp)
+
+    # Print calibration instructions
+    logger.info("Field calibration - Click the following points in order:")
+    logger.info("  1: Top-Left    2: Top-Right    3: Bottom-Right    4: Bottom-Left")
+    logger.info("  5: Halfway-Line Top    6: Halfway-Line Bottom")
+    logger.info("Window closes automatically after 6 clicks.\n")
+
+    cv2.imshow(WIN, disp)
+    cv2.setMouseCallback(WIN, on_click)
+
+    # Wait for user to select all points or press ESC
+    while len(pts) < config.num_calib_points:
+        key = cv2.waitKey(50)
+        if key == 27:  # ESC to abort
+            logger.warning("Calibration cancelled by user")
+            break
+
+    cv2.destroyAllWindows()
+    return np.array(pts, dtype=np.float32)
+
+
+# ===================== HELPER FUNCTIONS =====================
+
+def parse_start_time(time_str: str) -> int:
+    """
+    Parse start time string in MM:SS or SS format.
+    
+    Args:
+        time_str: Time string (e.g., "01:30", "90")
+        
+    Returns:
+        Time in seconds, or 0 if invalid
+    """
+    try:
+        parts = time_str.split(":")
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + int(parts[1])
+        else:
+            return int(parts[0])
+    except (ValueError, IndexError):
+        logger.warning(f"Invalid time format '{time_str}' - starting from 0")
+        return 0
+
+
+def read_first_frame(cap: cv2.VideoCapture, config: Config) -> Optional[np.ndarray]:
+    """
+    Read first frame from video capture with retry logic.
+    
+    Args:
+        cap: Video capture object
+        config: Configuration with retry settings
+        
+    Returns:
+        First frame or None if failed
+    """
+    for attempt in range(config.stream_read_retries):
+        ret, frame = cap.read()
+        if ret and frame is not None and frame.size > 0:
+            logger.info(f"First frame acquired after {attempt} attempts")
+            return frame
+        
+        if attempt < config.stream_read_retries - 1:
+            logger.debug(f"Waiting for stream buffer... ({attempt + 1}/{config.stream_read_retries})")
+            time.sleep(config.stream_read_delay)
+    
+    logger.error("Could not read first frame")
+    return None
+
+
+def setup_detectors(config: Config) -> Tuple[Optional[YOLO], Optional[sv.ByteTrack]]:
+    """
+    Initialize YOLO model and ByteTrack tracker.
+    
+    Args:
+        config: Configuration object
+        
+    Returns:
+        Tuple of (model, tracker) or (None, None) if failed
+    """
+    try:
+        model = YOLO(config.model_name)
+        logger.info(f"YOLO model '{config.model_name}' loaded successfully")
+    except Exception as e:
+        logger.error(f"Failed to load YOLO model: {e}")
+        return None, None
+    
+    tracker = sv.ByteTrack(track_activation_threshold=config.track_activation_threshold)
+    logger.info("ByteTrack tracker initialized")
+    
+    return model, tracker
+
+
+def process_frame(frame: np.ndarray,
+                  model: YOLO,
+                  tracker: sv.ByteTrack,
+                  classifier: TeamClassifier,
+                  smoother: PositionSmoother,
+                  transformer: PiecewiseTransformer,
+                  kpi_tracker: KPITracker,
+                  board_drawer: TacticalBoard,
+                  config: Config,
+                  fps: float) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Process a single frame: detect, track, classify, and render.
+    
+    Args:
+        frame: Input video frame
+        model: YOLO detector
+        tracker: ByteTrack tracker
+        classifier: Team classifier
+        smoother: Position smoother
+        transformer: Perspective transformer
+        kpi_tracker: KPI tracker
+        board_drawer: Tactical board renderer
+        config: Configuration object
+        fps: Frames per second
+        
+    Returns:
+        Tuple of (annotated camera frame, tactical board frame)
+    """
+    # 1. YOLO detection
+    results = model.predict(
+        frame,
+        classes=[config.player_class_id, config.ball_class_id],
+        conf=config.yolo_conf_threshold,
+        verbose=False
+    )[0]
+    detections = sv.Detections.from_ultralytics(results)
+
+    player_dets = detections[detections.class_id == config.player_class_id]
+    ball_dets = detections[detections.class_id == config.ball_class_id]
+
+    # 2. ByteTrack for persistent IDs
+    tracked = tracker.update_with_detections(player_dets)
+
+    # 3. Train classifier once enough players visible
+    if not classifier.trained and len(tracked) >= config.min_players_for_train:
+        classifier.train_teams(frame, tracked, config)
+
+    # 4. Map player positions to board with smoothing
+    players_frame: List[Tuple[int, np.ndarray, int]] = []
+    if len(tracked) > 0:
+        feet = tracked.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+        for i, foot in enumerate(feet):
+            tid = int(tracked.tracker_id[i])
+            team_id = classifier.predict_team(frame, tracked.xyxy[i])
+            mapped = transformer.transform(foot)
+            smooth = smoother.update(tid, mapped)
+            players_frame.append((tid, smooth, team_id))
+
+    # 5. Map ball position
+    mapped_ball: Optional[np.ndarray] = None
+    if len(ball_dets) > 0:
+        ball_center = ball_dets.get_anchors_coordinates(sv.Position.CENTER)[0]
+        mapped_ball = transformer.transform(ball_center)
+
+    # 6. Update KPI accumulators
+    kpi_tracker.update(players_frame, mapped_ball, fps, config)
+
+    # 7. Annotate camera frame
+    annotated = frame.copy()
+    for i, bbox in enumerate(tracked.xyxy):
+        team_id = classifier.predict_team(frame, bbox)
+        color = (128, 128, 128) if team_id < 0 else TacticalBoard.TEAM_COLORS[team_id % 2]
+        x1, y1, x2, y2 = map(int, bbox)
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+
+    # 8. Render tactical board
+    board_img = board_drawer.draw_state(players_frame, mapped_ball, kpi_tracker, fps)
+
+    return annotated, board_img
+
+
+# ===================== MAIN =====================
+
+def main(cfg: Optional[Config] = None) -> None:
+    """
+    Main analysis pipeline.
+    
+    Args:
+        cfg: Optional custom configuration (uses default if None)
+    """
+    cfg = cfg or Config()
+    
+    # Get input from user
+    url = input("YouTube URL: ").strip()
+    if not url:
+        logger.error("Empty URL provided")
+        return
+
+    start_time_str = input("Start time (MM:SS, optional -- press Enter to skip): ").strip()
+    
+    # Open stream
+    logger.info("Opening YouTube stream via yt-dlp...")
+    cap = open_youtube_stream(url, cfg)
+    if cap is None or not cap.isOpened():
+        logger.error("Failed to open stream. Common fixes:")
+        logger.error("  1. pip install --upgrade yt-dlp")
+        logger.error("  2. Verify the video is public and not age-restricted")
+        return
+
+    # Seek to start time
+    start_seconds = parse_start_time(start_time_str)
+    if start_seconds > 0:
+        cap.set(cv2.CAP_PROP_POS_MSEC, start_seconds * 1000)
+        logger.info(f"Seeking to {start_seconds} seconds")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    logger.info(f"Video FPS: {fps}")
+
+    # Read first frame
+    first_frame = read_first_frame(cap, cfg)
+    if first_frame is None:
+        cap.release()
+        return
+
+    # Calibration
+    source_points = select_points(first_frame.copy(), cfg)
+    if len(source_points) != cfg.num_calib_points:
+        logger.error(f"Need {cfg.num_calib_points} calibration points, got {len(source_points)}")
+        cap.release()
+        return
+
+    try:
+        transformer = PiecewiseTransformer(source_points, cfg.board_width, cfg.board_height)
+    except Exception as e:
+        logger.error(f"Perspective transform setup failed: {e}")
+        cap.release()
+        return
+
+    # Initialize components
+    board_drawer = TacticalBoard(cfg.board_width, cfg.board_height)
+    classifier = TeamClassifier()
+    smoother = PositionSmoother(cfg.smoothing_window)
+    kpi_tracker = KPITracker()
+
+    model, tracker = setup_detectors(cfg)
+    if model is None or tracker is None:
+        cap.release()
+        return
+
+    # Create display windows
+    cv2.namedWindow("Camera View", cv2.WINDOW_NORMAL)
+    cv2.namedWindow("Tactical Board", cv2.WINDOW_NORMAL)
+
+    frame_idx = 0
+    t_start = time.time()
+    logger.info("Processing started - press Q to stop and export KPIs")
+
+    try:
+        # Main frame loop
+        while True:
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                logger.info("End of stream reached")
+                break
+
+            frame_idx += 1
+
+            # Process frame and get visualizations
+            try:
+                annotated, board_img = process_frame(
+                    frame, model, tracker, classifier, smoother, transformer,
+                    kpi_tracker, board_drawer, cfg, fps
+                )
+            except Exception as e:
+                logger.error(f"Error processing frame {frame_idx}: {e}")
+                continue
+
+            # Add frame counter overlay
+            elapsed = time.time() - t_start
+            cv2.putText(annotated, f"Frame {frame_idx} | {elapsed:.0f}s",
+                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            # Display
+            cv2.imshow("Camera View", annotated)
+            cv2.imshow("Tactical Board", board_img)
+
+            # Check for exit command
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                logger.info("Stream interrupted by user (Q pressed)")
+                break
+
+    finally:
+        # Cleanup
+        cap.release()
+        cv2.destroyAllWindows()
+
+    # Export results
+    logger.info(f"Processing completed - {frame_idx} frames analyzed")
+    logger.info("=== MATCH KPI SUMMARY ===")
+    
+    summary = kpi_tracker.get_summary(fps)
+    for tid, kpis in sorted(summary.items()):
+        logger.info(
+            f"  Player {tid:3d} | Team {kpis['team']} | "
+            f"Distance: {kpis['distance_m']:6.1f}m | "
+            f"Duels: {kpis['duel_frames']:4d} | "
+            f"Possession: {kpis['possession_s']:5.1f}s | "
+            f"Sprints: {kpis['sprint_count']:3d}"
+        )
+
+    kpi_tracker.export_csv(cfg.output_csv, fps)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+    except Exception as e:
+        logger.exception(f"Unexpected error: {e}")
