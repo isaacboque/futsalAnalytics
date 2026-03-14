@@ -75,7 +75,8 @@ config = Config()
 def open_youtube_stream(url: str, config: Config) -> Optional[cv2.VideoCapture]:
     """
     Opens a YouTube video as an OpenCV VideoCapture by extracting the direct
-    stream URL via yt-dlp. Tries 720p, 480p, 360p in order.
+    stream URL via yt-dlp. Tries to get the best available quality first,
+    then falls back to lower qualities if needed.
     
     Args:
         url: YouTube video URL
@@ -84,7 +85,7 @@ def open_youtube_stream(url: str, config: Config) -> Optional[cv2.VideoCapture]:
     Returns:
         cv2.VideoCapture if successful, None otherwise.
     """
-    formats = ["best[height<=720]", "best[height<=480]", "best[height<=360]"]
+    formats = ["best", "best[height<=1080]", "best[height<=720]", "best[height<=480]", "best[height<=360]"]
     
     for fmt in formats:
         try:
@@ -603,26 +604,61 @@ class TacticalBoard:
         self.height: int = height
 
     def _draw_pitch(self, board: np.ndarray) -> None:
-        """Draw pitch markings on the tactical board."""
-        # Pitch boundary
-        cv2.rectangle(board, (0, 0), (self.width - 1, self.height - 1), (255, 255, 255), 3)
+        """Draw professional pitch markings on the tactical board."""
+        line_color = (255, 255, 255)
+        center_x = self.width // 2
+        center_y = self.height // 2
         
-        # Halfway line
-        cv2.line(board, (self.width // 2, 0), (self.width // 2, self.height), (255, 255, 255), 2)
+        # Pitch boundary (outer touchlines and goal lines) - thick lines
+        cv2.rectangle(board, (0, 0), (self.width - 1, self.height - 1), line_color, 3)
         
-        # Centre spot
-        cv2.circle(board, (self.width // 2, self.height // 2), 50, (255, 255, 255), 2)
+        # Halfway line (vertical center line)
+        cv2.line(board, (center_x, 0), (center_x, self.height), line_color, 2)
         
-        # Penalty areas
-        pa_w, pa_h = 120, 220
-        cy = self.height // 2
+        # Center spot (midfield)
+        cv2.circle(board, (center_x, center_y), 5, line_color, -1)
         
-        # Left penalty area
-        cv2.rectangle(board, (0, cy - pa_h // 2), (pa_w, cy + pa_h // 2), (200, 200, 200), 1)
+        # Center circle
+        cv2.circle(board, (center_x, center_y), 75, line_color, 2)
         
-        # Right penalty area
-        cv2.rectangle(board, (self.width - pa_w, cy - pa_h // 2),
-                      (self.width, cy + pa_h // 2), (200, 200, 200), 1)
+        # Penalty areas dimensions (professional proportions)
+        pen_box_w, pen_box_h = 150, 240
+        goal_box_w, goal_box_h = 50, 90
+        
+        # Left side boxes
+        left_pen_y1 = center_y - pen_box_h // 2
+        left_pen_y2 = center_y + pen_box_h // 2
+        left_goal_y1 = center_y - goal_box_h // 2
+        left_goal_y2 = center_y + goal_box_h // 2
+        
+        # Left penalty box
+        cv2.rectangle(board, (0, left_pen_y1), (pen_box_w, left_pen_y2), line_color, 2)
+        # Left goal area
+        cv2.rectangle(board, (0, left_goal_y1), (goal_box_w, left_goal_y2), line_color, 2)
+        # Left penalty spot
+        cv2.circle(board, (int(pen_box_w * 0.6), center_y), 4, line_color, -1)
+        
+        # Right side boxes
+        right_pen_y1 = center_y - pen_box_h // 2
+        right_pen_y2 = center_y + pen_box_h // 2
+        right_goal_y1 = center_y - goal_box_h // 2
+        right_goal_y2 = center_y + goal_box_h // 2
+        
+        # Right penalty box
+        cv2.rectangle(board, (self.width - pen_box_w, right_pen_y1), 
+                      (self.width, right_pen_y2), line_color, 2)
+        # Right goal area
+        cv2.rectangle(board, (self.width - goal_box_w, right_goal_y1), 
+                      (self.width, right_goal_y2), line_color, 2)
+        # Right penalty spot
+        cv2.circle(board, (self.width - int(pen_box_w * 0.6), center_y), 4, line_color, -1)
+        
+        # Corner arcs (quarter circles at corners)
+        corner_radius = 20
+        cv2.ellipse(board, (0, 0), (corner_radius, corner_radius), 0, 0, 90, line_color, 1)
+        cv2.ellipse(board, (self.width, 0), (corner_radius, corner_radius), 0, 90, 180, line_color, 1)
+        cv2.ellipse(board, (self.width, self.height), (corner_radius, corner_radius), 0, 180, 270, line_color, 1)
+        cv2.ellipse(board, (0, self.height), (corner_radius, corner_radius), 0, 270, 360, line_color, 1)
 
     def draw_state(self, 
                    players: List[Tuple[int, np.ndarray, int]], 
@@ -648,7 +684,7 @@ class TacticalBoard:
         # Draw pitch markings
         self._draw_pitch(board)
 
-        # Draw players
+        # Draw players (team-only visualization, no IDs)
         for track_id, pos, team_id in players:
             if team_id < 0:  # Skip referee
                 continue
@@ -660,19 +696,10 @@ class TacticalBoard:
             # Team color
             color = self.TEAM_COLORS[team_id % len(self.TEAM_COLORS)]
             
-            # Draw player circle and outline
-            cv2.circle(board, (x, y), 10, color, -1)
-            cv2.circle(board, (x, y), 11, (255, 255, 255), 1)
-            
-            # Draw player ID
-            cv2.putText(board, str(track_id), (x + 13, y + 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            
-            # Draw distance if available
-            if kpi_tracker and track_id in kpi_tracker.distance:
-                d = kpi_tracker.distance[track_id]
-                cv2.putText(board, f"{d:.0f}m", (x + 13, y + 17),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 255, 200), 1)
+            # Draw player circle with team color
+            cv2.circle(board, (x, y), 12, color, -1)
+            # White outline for better visibility
+            cv2.circle(board, (x, y), 12, (255, 255, 255), 2)
 
         # Draw ball
         if ball_mapped is not None:
@@ -691,6 +718,7 @@ class TacticalBoard:
 def select_points(frame: np.ndarray, config: Config) -> np.ndarray:
     """
     Shows the first video frame and lets the user click calibration points.
+    Professional interface with clear visual feedback and instructions.
     
     Click order:
         1=Top-Left  2=Top-Right  3=Bottom-Right  4=Bottom-Left
@@ -705,26 +733,95 @@ def select_points(frame: np.ndarray, config: Config) -> np.ndarray:
     """
     h, w = frame.shape[:2]
     scale = config.max_display_width / w if w > config.max_display_width else 1.0
-    disp = cv2.resize(frame, (int(w * scale), int(h * scale)))
+    disp = cv2.resize(frame, (int(w * scale), int(h * scale))).copy()
     pts: List[List[int]] = []
-    WIN = "Field Calibration"
+    WIN = "FIELD CALIBRATION - Court Point Selection"
+    
+    # Point labels and colors
+    point_labels = [
+        "Top-Left Corner",
+        "Top-Right Corner",
+        "Bottom-Right Corner",
+        "Bottom-Left Corner",
+        "Halfway Line (Top)",
+        "Halfway Line (Bottom)"
+    ]
+    point_colors = [
+        (0, 255, 0),      # Green for corners
+        (0, 255, 0),
+        (0, 255, 0),
+        (0, 255, 0),
+        (0, 165, 255),    # Orange for halfway line
+        (0, 165, 255)
+    ]
+
+    def draw_instructions(image: np.ndarray, current_step: int) -> np.ndarray:
+        """Add professional instructions overlay."""
+        img = image.copy()
+        overlay = img.copy()
+        
+        # Semi-transparent dark background for text area
+        cv2.rectangle(overlay, (0, 0), (disp.shape[1], 110), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.4, img, 0.6, 0, img)
+        
+        # Title
+        cv2.putText(img, "COURT CALIBRATION", (15, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+        
+        # Current instruction
+        instruction = f"Step {current_step + 1}/6: Click on {point_labels[current_step]}"
+        cv2.putText(img, instruction, (15, 65),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, point_colors[current_step], 2)
+        
+        # Status bar at bottom
+        progress_text = f"Progress: {current_step}/{config.num_calib_points}  |  Press ESC to cancel"
+        cv2.putText(img, progress_text, (15, img.shape[0] - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        
+        return img
 
     def on_click(event, x, y, flags, param) -> None:
-        """Mouse callback for point selection."""
+        """Mouse callback for point selection with professional feedback."""
         if event == cv2.EVENT_LBUTTONDOWN and len(pts) < config.num_calib_points:
             pts.append([int(x / scale), int(y / scale)])
-            cv2.circle(disp, (x, y), 6, (0, 0, 255), -1)
-            cv2.putText(disp, str(len(pts)), (x + 8, y - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            cv2.imshow(WIN, disp)
+            idx = len(pts) - 1
+            
+            # Draw point marker
+            cv2.circle(disp, (x, y), 10, point_colors[idx], -1)
+            cv2.circle(disp, (x, y), 11, (255, 255, 255), 2)
+            
+            # Draw point number in a box
+            cv2.rectangle(disp, (x - 20, y - 30), (x + 20, y - 5), point_colors[idx], -1)
+            cv2.putText(disp, str(idx + 1), (x - 12, y - 13),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            
+            # Update display
+            display = draw_instructions(disp, len(pts))
+            cv2.imshow(WIN, display)
 
-    # Print calibration instructions
-    logger.info("Field calibration - Click the following points in order:")
-    logger.info("  1: Top-Left    2: Top-Right    3: Bottom-Right    4: Bottom-Left")
-    logger.info("  5: Halfway-Line Top    6: Halfway-Line Bottom")
-    logger.info("Window closes automatically after 6 clicks.\n")
+    # Print calibration instructions to console
+    logger.info("="*70)
+    logger.info(" "*15 + "FIELD CALIBRATION - PROFESSIONAL COURT SETUP")
+    logger.info("="*70)
+    logger.info("Click on the following court points in order:")
+    logger.info("")
+    logger.info("  CORNERS:")
+    logger.info("    1. Top-Left Corner           (top-left corner of the field)")
+    logger.info("    2. Top-Right Corner          (top-right corner of the field)")
+    logger.info("    3. Bottom-Right Corner       (bottom-right corner of the field)")
+    logger.info("    4. Bottom-Left Corner        (bottom-left corner of the field)")
+    logger.info("")
+    logger.info("  HALFWAY LINE:")
+    logger.info("    5. Halfway Line (Top)        (where midline meets top boundary)")
+    logger.info("    6. Halfway Line (Bottom)     (where midline meets bottom boundary)")
+    logger.info("-"*70)
+    logger.info("Window will close automatically after all points are selected.")
+    logger.info("Press ESC to cancel calibration.")
+    logger.info("="*70 + "\n")
 
-    cv2.imshow(WIN, disp)
+    # Initial display with first instruction
+    display = draw_instructions(disp, 0)
+    cv2.imshow(WIN, display)
     cv2.setMouseCallback(WIN, on_click)
 
     # Wait for user to select all points or press ESC
@@ -735,6 +832,10 @@ def select_points(frame: np.ndarray, config: Config) -> np.ndarray:
             break
 
     cv2.destroyAllWindows()
+    
+    if len(pts) == config.num_calib_points:
+        logger.info("✓ Calibration completed successfully!\n")
+    
     return np.array(pts, dtype=np.float32)
 
 
@@ -894,9 +995,9 @@ def process_frame(frame: np.ndarray,
         x1, y1, x2, y2 = map(int, bbox)
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
         
-        # Add team indicator text
-        team_text = "REF" if team_id < 0 else f"T{team_id}"
-        cv2.putText(annotated, team_text, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+        # Add team indicator text (no player ID)
+        team_text = "REF" if team_id < 0 else f"TEAM {team_id}"
+        cv2.putText(annotated, team_text, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
     # 8. Render tactical board
     board_img = board_drawer.draw_state(players_frame, mapped_ball, kpi_tracker, fps)
