@@ -125,7 +125,7 @@ class FieldCalibrator:
     
     def __init__(self, frame: np.ndarray):
         """Inicializa el calibrador."""
-        self.original_frame = frame.copy()
+        self.frame = frame.copy()
         self.h, self.w = frame.shape[:2]
         
         # Inicializar rectángulo por defecto (área central del frame)
@@ -135,81 +135,72 @@ class FieldCalibrator:
         self.x2 = self.w - margin
         self.y2 = self.h - margin
         
-        self.dragging_handle = None
+        self.dragging = False
+        self.active_corner = None
         self.WIN = "Calibración de Campo"
     
     def draw_frame(self) -> np.ndarray:
         """Dibuja el frame con el rectángulo."""
-        img = self.original_frame.copy()
+        img = self.frame.copy()
         
         # Oscurecer área fuera del rectángulo
         overlay = img.copy()
         cv2.rectangle(overlay, (0, 0), (self.w, self.h), (0, 0, 0), -1)
-        cv2.rectangle(overlay, (self.x1, self.y1), (self.x2, self.y2), (0, 100, 0), -1)
-        cv2.addWeighted(overlay, 0.3, img, 0.7, 0, img)
+        cv2.rectangle(overlay, (self.x1, self.y1), (self.x2, self.y2), (50, 100, 50), -1)
+        cv2.addWeighted(overlay, 0.4, img, 0.6, 0, img)
         
-        # Dibujar rectángulo principal
-        cv2.rectangle(img, (self.x1, self.y1), (self.x2, self.y2), (0, 255, 0), 4)
+        # Dibujar rectángulo principal con línea gruesa
+        cv2.rectangle(img, (self.x1, self.y1), (self.x2, self.y2), (0, 255, 0), 5)
         
-        # Dibujar asas (esquinas) grandes
-        handle_size = 20
+        # Dibujar asas (esquinas) grandes y claras
+        handle_size = 25
+        thickness = 3
         handles = [
-            (self.x1, self.y1),
-            (self.x2, self.y1),
-            (self.x2, self.y2),
-            (self.x1, self.y2),
+            (self.x1, self.y1),  # arriba-izquierda
+            (self.x2, self.y1),  # arriba-derecha
+            (self.x2, self.y2),  # abajo-derecha
+            (self.x1, self.y2),  # abajo-izquierda
         ]
-        for x, y in handles:
+        
+        for i, (x, y) in enumerate(handles):
             cv2.circle(img, (x, y), handle_size, (0, 255, 255), -1)
-            cv2.circle(img, (x, y), handle_size + 2, (255, 255, 255), 2)
+            cv2.circle(img, (x, y), handle_size, (255, 255, 255), thickness)
         
         return img
     
-    def get_nearest_handle(self, x: int, y: int, threshold: int = 30) -> Optional[int]:
-        """Obtener qué esquina está más cerca del click."""
-        handles = [
+    def get_corner_index(self, x: int, y: int) -> Optional[int]:
+        """Retorna el índice de la esquina más cercana si está dentro del threshold."""
+        corners = [
             (self.x1, self.y1, 0),
             (self.x2, self.y1, 1),
             (self.x2, self.y2, 2),
             (self.x1, self.y2, 3),
         ]
         
-        min_dist = float('inf')
-        closest_handle = None
+        threshold = 40
+        for cx, cy, idx in corners:
+            dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+            if dist < threshold:
+                return idx
         
-        for hx, hy, idx in handles:
-            dist = np.sqrt((x - hx)**2 + (y - hy)**2)
-            if dist < threshold and dist < min_dist:
-                min_dist = dist
-                closest_handle = idx
-        
-        return closest_handle
+        return None
     
-    def mouse_callback(self, event, x, y, flags, param):
-        """Callback para eventos del ratón."""
-        if event == cv2.EVENT_LBUTTONDOWN:
-            handle_idx = self.get_nearest_handle(x, y)
-            if handle_idx is not None:
-                self.dragging_handle = handle_idx
-                print(f"Esquina {handle_idx} seleccionada")
+    def update_corner(self, corner_idx: int, x: int, y: int):
+        """Actualiza la posición de una esquina."""
+        min_size = 50
         
-        elif event == cv2.EVENT_MOUSEMOVE:
-            if self.dragging_handle is not None:
-                if self.dragging_handle == 0:
-                    self.x1 = max(0, min(x, self.x2 - 50))
-                    self.y1 = max(0, min(y, self.y2 - 50))
-                elif self.dragging_handle == 1:
-                    self.x2 = max(self.x1 + 50, min(x, self.w))
-                    self.y1 = max(0, min(y, self.y2 - 50))
-                elif self.dragging_handle == 2:
-                    self.x2 = max(self.x1 + 50, min(x, self.w))
-                    self.y2 = max(self.y1 + 50, min(y, self.h))
-                elif self.dragging_handle == 3:
-                    self.x1 = max(0, min(x, self.x2 - 50))
-                    self.y2 = max(self.y1 + 50, min(y, self.h))
-        
-        elif event == cv2.EVENT_LBUTTONUP:
-            self.dragging_handle = None
+        if corner_idx == 0:  # arriba-izquierda
+            self.x1 = max(0, min(x, self.x2 - min_size))
+            self.y1 = max(0, min(y, self.y2 - min_size))
+        elif corner_idx == 1:  # arriba-derecha
+            self.x2 = max(self.x1 + min_size, min(x, self.w))
+            self.y1 = max(0, min(y, self.y2 - min_size))
+        elif corner_idx == 2:  # abajo-derecha
+            self.x2 = max(self.x1 + min_size, min(x, self.w))
+            self.y2 = max(self.y1 + min_size, min(y, self.h))
+        elif corner_idx == 3:  # abajo-izquierda
+            self.x1 = max(0, min(x, self.x2 - min_size))
+            self.y2 = max(self.y1 + min_size, min(y, self.h))
     
     def calibrate(self) -> np.ndarray:
         """Ejecutar la interfaz de calibración."""
@@ -217,19 +208,43 @@ class FieldCalibrator:
         print("CALIBRACIÓN DE CAMPO - FUTSAL")
         print("="*70)
         print("\nInstrucciones:")
-        print("  1. Haz CLIC en los puntos amarillos (esquinas del rectángulo)")
-        print("  2. ARRASTRA cada esquina hasta los límites reales del campo")
-        print("  3. Puedes mover el rectángulo fuera de los límites si es necesario")
-        print("  4. Los puntos amarillos se ajustarán en tiempo real mientras arrastras")
+        print("  1. Haz CLIC en los puntos amarillos (esquinas)")
+        print("  2. ARRASTRA cada esquina hasta los límites del campo")
+        print("  3. Puedes mover fuera de los límites si es necesario")
+        print("  4. Los puntos se ajustarán en tiempo real")
         print("\nControles:")
-        print("  - CLIC + ARRASTRAR en las esquinas (puntos amarillos) para ajustar")
+        print("  - CLIC + ARRASTRAR en esquinas para ajustar")
         print("  - ESPACIO para confirmar")
-        print("  - R para resetear a valores por defecto")
+        print("  - R para resetear")
         print("  - ESC para cancelar")
         print("="*70 + "\n")
         
-        cv2.namedWindow(self.WIN, cv2.WINDOW_AUTOSIZE)
-        cv2.setMouseCallback(self.WIN, self.mouse_callback)
+        cv2.namedWindow(self.WIN)
+        
+        # Variables para el mouse callback
+        state = {'dragging': False, 'corner': None}
+        
+        def mouse_event(event, x, y, flags, param):
+            """Maneja eventos del ratón."""
+            if event == cv2.EVENT_LBUTTONDOWN:
+                corner_idx = self.get_corner_index(x, y)
+                if corner_idx is not None:
+                    state['dragging'] = True
+                    state['corner'] = corner_idx
+                    print(f"Arrastrando esquina {corner_idx}")
+            
+            elif event == cv2.EVENT_MOUSEMOVE:
+                if state['dragging'] and state['corner'] is not None:
+                    self.update_corner(state['corner'], x, y)
+            
+            elif event == cv2.EVENT_LBUTTONUP:
+                state['dragging'] = False
+                state['corner'] = None
+        
+        # Registrar el callback
+        cv2.setMouseCallback(self.WIN, mouse_event)
+        
+        print("Ventana abierta. Mueve los puntos amarillos.\n")
         
         while True:
             img = self.draw_frame()
@@ -238,7 +253,7 @@ class FieldCalibrator:
             key = cv2.waitKey(30) & 0xFF
             
             if key == ord(' '):
-                print("\n✓ Calibración confirmada")
+                print("✓ Calibración confirmada\n")
                 break
             elif key == ord('r') or key == ord('R'):
                 margin = max(100, int(min(self.w, self.h) * 0.1))
@@ -246,9 +261,9 @@ class FieldCalibrator:
                 self.y1 = margin
                 self.x2 = self.w - margin
                 self.y2 = self.h - margin
-                print("Rectángulo reseteado a valores por defecto")
+                print("Rectángulo reseteado\n")
             elif key == 27:
-                print("\n✗ Calibración cancelada")
+                print("✗ Calibración cancelada\n")
                 break
         
         cv2.destroyAllWindows()
