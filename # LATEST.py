@@ -121,31 +121,88 @@ def open_youtube_stream(url: str, config: Config) -> Optional[cv2.VideoCapture]:
 
 # ===================== TEAM CLASSIFIER =====================
 
+# ===================== FIELD VALIDATOR =====================
+
+class FieldValidator:
+    """
+    Validates if detected players are within the playing field boundaries.
+    Uses convex hull of calibration points to define valid region.
+    """
+
+    def __init__(self, src_pts: np.ndarray):
+        """
+        Initialize field validator with calibration points.
+        
+        Args:
+            src_pts: Array of 6 calibration points (camera space)
+        """
+        if len(src_pts) != 6:
+            raise ValueError("Need exactly 6 calibration points")
+        
+        # Create convex hull from the 4 corner points (ignore midline points initially)
+        tl, tr, br, bl, mt, mb = src_pts
+        corners = np.array([tl, tr, br, bl], dtype=np.float32)
+        
+        # Calculate convex hull that encompasses the field
+        hull = cv2.convexHull(corners)
+        self.field_polygon = hull
+        logger.info(f"Field validator initialized with polygon: {hull.shape}")
+
+    def is_within_field(self, point: np.ndarray) -> bool:
+        """
+        Check if a point is within the field boundaries.
+        
+        Args:
+            point: Point [x, y] in camera space
+            
+        Returns:
+            True if point is within field polygon
+        """
+        point_array = np.array([[[point[0], point[1]]]], dtype=np.float32)
+        result = cv2.pointPolygonTest(self.field_polygon, point[:2], False)
+        return result >= 0
+
+    def filter_detections(self, detections: sv.Detections, feet_coords: np.ndarray) -> np.ndarray:
+        """
+        Filter detections to keep only those within the field.
+        
+        Args:
+            detections: Supervision detections
+            feet_coords: Feet coordinates (anchors) for each detection
+            
+        Returns:
+            Boolean mask of valid detections
+        """
+        valid_mask = np.array([self.is_within_field(foot) for foot in feet_coords])
+        return valid_mask
+
+
 # ===================== TEAM CLASSIFIER =====================
 
 class TeamClassifier:
     """
     Separates players into two teams using K-Means clustering on jersey colour.
 
-    Uses HSV colour space instead of BGR: hue is consistent under varying
-    lighting conditions, making classification more robust to shadows and
-    brightness differences across the pitch.
-
-    Uses 3 clusters (not 2) to account for the referee, whose jersey colour
-    typically differs from both teams. The smallest cluster is identified as
-    the referee and assigned team ID -1, excluding it from all KPI computation.
+    Uses HSV colour space with enhanced feature extraction:
+    - Hue: Primary color identifier
+    - Saturation: Excludes reflections and shadows
+    - Value: Brightness normalization
+    
+    Uses 3 clusters to account for referee (smallest cluster = -1 team).
     
     Attributes:
         kmeans: KMeans clusterer instance
         trained: Whether classification model has been fitted
         ref_label: Cluster label assigned to the referee
+        color_features: Extracted HSV features for analysis
     """
 
-    def __init__(self, n_clusters: int = 3, n_init: int = 10):
-        """Initialize the classifier with default hyperparameters."""
+    def __init__(self, n_clusters: int = 3, n_init: int = 20):
+        """Initialize the classifier with enhanced hyperparameters."""
         self.kmeans: KMeans = KMeans(n_clusters=n_clusters, n_init=n_init, random_state=42)
         self.trained: bool = False
         self.ref_label: Optional[int] = None
+        self.color_features: Optional[np.ndarray] = None
 
     @staticmethod
     def _safe_crop(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> np.ndarray:
@@ -157,16 +214,17 @@ class TeamClassifier:
             return np.zeros((1, 1, 3), dtype=frame.dtype)
         return frame[y1:y2, x1:x2]
 
-    def get_jersey_color(self, frame: np.ndarray, bbox: np.ndarray) -> np.ndarray:
+    def get_jersey_color_features(self, frame: np.ndarray, bbox: np.ndarray) -> np.ndarray:
         """
-        Extract mean HSV colour of the upper 40% of the bounding box (shirt region).
+        Extract enhanced HSV features from jersey region.
+        Uses upper 40% of bounding box (shirt area) and filters by saturation.
         
         Args:
             frame: Input image frame
             bbox: Bounding box [x1, y1, x2, y2]
             
         Returns:
-            HSV color vector as float32 array
+            Feature vector [hue, saturation, value] as float32
         """
         x1, y1, x2, y2 = map(int, bbox)
         jersey_h = int((y2 - y1) * 0.4)
@@ -175,7 +233,24 @@ class TeamClassifier:
         if crop.size == 0:
             return np.array([0, 0, 0], dtype=np.float32)
         
-        return np.mean(cv2.cvtColor(crop, cv2.COLOR_BGR2HSV), axis=(0, 1)).astype(np.float32)
+        # Convert to HSV
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV).astype(np.float32)
+        
+        # Filter pixels by saturation (exclude very desaturated pixels = reflections)
+        saturation_mask = hsv[:, :, 1] > 30  # Min saturation threshold
+        
+        if saturation_mask.sum() < 5:
+            # Fallback if too few saturated pixels
+            return np.mean(hsv, axis=(0, 1)).astype(np.float32)
+        
+        # Calculate mean of saturated pixels only
+        filtered_hsv = hsv[saturation_mask]
+        features = np.mean(filtered_hsv, axis=0).astype(np.float32)
+        
+        # Normalize hue to [0, 180] range
+        features[0] = np.clip(features[0], 0, 180)
+        
+        return features
 
     def train_teams(self, frame: np.ndarray, detections: sv.Detections, config: Config) -> bool:
         """
@@ -191,25 +266,41 @@ class TeamClassifier:
             True if training succeeded, False otherwise
         """
         if len(detections) < config.min_players_for_kmeans:
+            logger.debug(f"Not enough players ({len(detections)}) for training")
             return False
         
         try:
-            colors = np.array(
-                [self.get_jersey_color(frame, b) for b in detections.xyxy],
+            # Extract enhanced color features
+            color_features = np.array(
+                [self.get_jersey_color_features(frame, b) for b in detections.xyxy],
                 dtype=np.float32
             )
             
-            # Skip if all colors are identical (no variation)
-            if np.allclose(colors.max(axis=0), colors.min(axis=0)):
-                logger.warning("All players have identical jersey colors - skipping training")
+            self.color_features = color_features
+            
+            # Check color variance
+            hue_var = np.var(color_features[:, 0])
+            sat_var = np.var(color_features[:, 1])
+            
+            if hue_var < 50:
+                logger.warning("Insufficient color variance for team classification")
                 return False
             
-            self.kmeans.fit(colors)
+            # Fit K-Means
+            self.kmeans.fit(color_features)
             self.trained = True
+            
+            # Assign referee as smallest cluster
             counts = np.bincount(self.kmeans.labels_)
             self.ref_label = int(np.argmin(counts))
             
-            logger.info(f"Team classifier trained. Referee cluster: {self.ref_label} (cluster sizes: {counts})")
+            logger.info(
+                f"Team classifier trained successfully. "
+                f"Referee cluster: {self.ref_label} | "
+                f"Cluster sizes: {counts} | "
+                f"Hue variance: {hue_var:.1f} | "
+                f"Saturation variance: {sat_var:.1f}"
+            )
             return True
             
         except Exception as e:
@@ -231,9 +322,8 @@ class TeamClassifier:
             return 0
         
         try:
-            label = int(self.kmeans.predict(
-                self.get_jersey_color(frame, bbox).reshape(1, -1)
-            )[0])
+            features = self.get_jersey_color_features(frame, bbox)
+            label = int(self.kmeans.predict(features.reshape(1, -1))[0])
             
             if label == self.ref_label:
                 return -1
@@ -725,12 +815,13 @@ def process_frame(frame: np.ndarray,
                   classifier: TeamClassifier,
                   smoother: PositionSmoother,
                   transformer: PiecewiseTransformer,
+                  field_validator: 'FieldValidator',
                   kpi_tracker: KPITracker,
                   board_drawer: TacticalBoard,
                   config: Config,
                   fps: float) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Process a single frame: detect, track, classify, and render.
+    Process a single frame: detect, track, classify, validate, and render.
     
     Args:
         frame: Input video frame
@@ -739,6 +830,7 @@ def process_frame(frame: np.ndarray,
         classifier: Team classifier
         smoother: Position smoother
         transformer: Perspective transformer
+        field_validator: Field boundary validator
         kpi_tracker: KPI tracker
         board_drawer: Tactical board renderer
         config: Configuration object
@@ -758,6 +850,13 @@ def process_frame(frame: np.ndarray,
 
     player_dets = detections[detections.class_id == config.player_class_id]
     ball_dets = detections[detections.class_id == config.ball_class_id]
+
+    # 1.5 Filter players: keep only those within field boundaries
+    if len(player_dets) > 0:
+        feet_coords = player_dets.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+        valid_mask = field_validator.filter_detections(player_dets, feet_coords)
+        player_dets = player_dets[valid_mask]
+        logger.debug(f"Filtered {np.sum(~valid_mask)} players outside field")
 
     # 2. ByteTrack for persistent IDs
     tracked = tracker.update_with_detections(player_dets)
@@ -781,7 +880,8 @@ def process_frame(frame: np.ndarray,
     mapped_ball: Optional[np.ndarray] = None
     if len(ball_dets) > 0:
         ball_center = ball_dets.get_anchors_coordinates(sv.Position.CENTER)[0]
-        mapped_ball = transformer.transform(ball_center)
+        if field_validator.is_within_field(ball_center):
+            mapped_ball = transformer.transform(ball_center)
 
     # 6. Update KPI accumulators
     kpi_tracker.update(players_frame, mapped_ball, fps, config)
@@ -793,6 +893,10 @@ def process_frame(frame: np.ndarray,
         color = (128, 128, 128) if team_id < 0 else TacticalBoard.TEAM_COLORS[team_id % 2]
         x1, y1, x2, y2 = map(int, bbox)
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        
+        # Add team indicator text
+        team_text = "REF" if team_id < 0 else f"T{team_id}"
+        cv2.putText(annotated, team_text, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
     # 8. Render tactical board
     board_img = board_drawer.draw_state(players_frame, mapped_ball, kpi_tracker, fps)
@@ -857,6 +961,14 @@ def main(cfg: Optional[Config] = None) -> None:
         cap.release()
         return
 
+    # Initialize field validator
+    try:
+        field_validator = FieldValidator(source_points)
+    except Exception as e:
+        logger.error(f"Field validator setup failed: {e}")
+        cap.release()
+        return
+
     # Initialize components
     board_drawer = TacticalBoard(cfg.board_width, cfg.board_height)
     classifier = TeamClassifier()
@@ -890,7 +1002,7 @@ def main(cfg: Optional[Config] = None) -> None:
             try:
                 annotated, board_img = process_frame(
                     frame, model, tracker, classifier, smoother, transformer,
-                    kpi_tracker, board_drawer, cfg, fps
+                    field_validator, kpi_tracker, board_drawer, cfg, fps
                 )
             except Exception as e:
                 logger.error(f"Error processing frame {frame_idx}: {e}")
