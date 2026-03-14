@@ -123,22 +123,21 @@ class FieldCalibrator:
     """
     Sistema de calibración por rectángulo ajustable para definir los límites del campo.
     Permite dibujar y ajustar un rectángulo que representa el área del futsal.
+    NO RECORTA LA IMAGEN - Trabaja con resolución original.
     """
     
     def __init__(self, frame: np.ndarray, config: Config):
-        """Inicializa el calibrador."""
+        """Inicializa el calibrador sin modificar la imagen."""
+        self.frame = frame.copy()
         self.h, self.w = frame.shape[:2]
-        self.scale = config.max_display_width / self.w if self.w > config.max_display_width else 1.0
-        self.disp = cv2.resize(frame, (int(self.w * self.scale), int(self.h * self.scale))).copy()
         
         # Inicializar rectángulo por defecto (área central del frame)
-        disp_w, disp_h = self.disp.shape[1], self.disp.shape[0]
-        margin = 100
+        margin = max(100, int(min(self.w, self.h) * 0.1))
         self.rect = {
-            'x1': int(margin / self.scale),
-            'y1': int(margin / self.scale),
-            'x2': int((disp_w - margin) / self.scale),
-            'y2': int((disp_h - margin) / self.scale)
+            'x1': margin,
+            'y1': margin,
+            'x2': self.w - margin,
+            'y2': self.h - margin
         }
         
         self.dragging = False
@@ -151,27 +150,34 @@ class FieldCalibrator:
             self.rect['x1'], self.rect['x2'] = self.rect['x2'], self.rect['x1']
         if self.rect['y1'] > self.rect['y2']:
             self.rect['y1'], self.rect['y2'] = self.rect['y2'], self.rect['y1']
+        
+        # Limitaciones de límites
+        self.rect['x1'] = max(0, min(self.rect['x1'], self.w - 1))
+        self.rect['x2'] = max(0, min(self.rect['x2'], self.w - 1))
+        self.rect['y1'] = max(0, min(self.rect['y1'], self.h - 1))
+        self.rect['y2'] = max(0, min(self.rect['y2'], self.h - 1))
     
     def draw_overlay(self) -> np.ndarray:
-        """Dibuja el rectángulo y las instrucciones."""
-        img = self.disp.copy()
+        """Dibuja el rectángulo y las instrucciones sin recortar."""
+        img = self.frame.copy()
         
         # Oscurecer área fuera del rectángulo
-        mask = np.zeros_like(img)
-        cv2.rectangle(mask, 
-                     (int(self.rect['x1']*self.scale), int(self.rect['y1']*self.scale)),
-                     (int(self.rect['x2']*self.scale), int(self.rect['y2']*self.scale)),
-                     (1, 1, 1), -1)
-        img = cv2.bitwise_and(img, img, mask=cv2.cvtColor((mask*255).astype(np.uint8), cv2.COLOR_BGR2GRAY))
+        overlay = img.copy()
+        cv2.rectangle(overlay, (0, 0), (self.w, self.h), (0, 0, 0), -1)
+        cv2.rectangle(overlay, 
+                     (self.rect['x1'], self.rect['y1']),
+                     (self.rect['x2'], self.rect['y2']),
+                     (0, 100, 0), -1)
+        cv2.addWeighted(overlay, 0.4, img, 0.6, 0, img)
         
-        # Dibujar rectángulo principal
+        # Dibujar rectángulo principal - línea verde gruesa
         cv2.rectangle(img,
-                     (int(self.rect['x1']*self.scale), int(self.rect['y1']*self.scale)),
-                     (int(self.rect['x2']*self.scale), int(self.rect['y2']*self.scale)),
-                     (0, 255, 0), 3)
+                     (self.rect['x1'], self.rect['y1']),
+                     (self.rect['x2'], self.rect['y2']),
+                     (0, 255, 0), 4)
         
-        # Dibujar asas de ajuste
-        handle_size = 8
+        # Dibujar asas de ajuste - esquinas interactivas
+        handle_size = 15
         handles = [
             (self.rect['x1'], self.rect['y1']),  # arriba-izquierda
             (self.rect['x2'], self.rect['y1']),  # arriba-derecha
@@ -179,27 +185,27 @@ class FieldCalibrator:
             (self.rect['x1'], self.rect['y2']),  # abajo-izquierda
         ]
         for x, y in handles:
-            cv2.circle(img, (int(x*self.scale), int(y*self.scale)), handle_size, (0, 255, 255), -1)
-            cv2.circle(img, (int(x*self.scale), int(y*self.scale)), handle_size+1, (255, 255, 255), 1)
+            cv2.circle(img, (x, y), handle_size, (0, 255, 255), -1)
+            cv2.circle(img, (x, y), handle_size + 2, (255, 255, 255), 2)
         
         # Superposición de instrucciones
         overlay = img.copy()
-        cv2.rectangle(overlay, (0, 0), (img.shape[1], 130), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.4, img, 0.6, 0, img)
+        cv2.rectangle(overlay, (0, 0), (self.w, 140), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.5, img, 0.5, 0, img)
         
         # Texto
-        cv2.putText(img, "CALIBRACIÓN DE CAMPO", (15, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
-        cv2.putText(img, "Arrastra las esquinas para ajustar el rectángulo del campo", (15, 65),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
-        cv2.putText(img, "ESPACIO: Confirmar  |  R: Resetear", (15, 95),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1)
+        cv2.putText(img, "CALIBRACIÓN DE CAMPO", (20, 35),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+        cv2.putText(img, "Arrastra las esquinas (puntos amarillos) para ajustar el rectángulo", (20, 75),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+        cv2.putText(img, "ESPACIO: Confirmar  |  R: Resetear  |  ESC: Cancelar", (20, 115),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 255, 100), 2)
         
         return img
     
     def get_handle_at(self, x: int, y: int) -> Optional[str]:
         """Obtener qué asa está siendo arrastrada."""
-        threshold = 15 / self.scale
+        threshold = 20
         handles = {
             'tl': (self.rect['x1'], self.rect['y1']),
             'tr': (self.rect['x2'], self.rect['y1']),
@@ -212,42 +218,43 @@ class FieldCalibrator:
         return None
     
     def on_mouse(self, event, x, y, flags, param):
-        """Callback del mouse."""
-        x_orig = x / self.scale
-        y_orig = y / self.scale
-        
+        """Callback del mouse completamente reactivo."""
         if event == cv2.EVENT_LBUTTONDOWN:
-            handle = self.get_handle_at(x_orig, y_orig)
+            handle = self.get_handle_at(x, y)
             if handle:
                 self.dragging = True
                 self.handle = handle
+                logger.debug(f"Comenzado arrastrar {handle}")
         
         elif event == cv2.EVENT_MOUSEMOVE:
             if self.dragging and self.handle:
                 if self.handle == 'tl':
-                    self.rect['x1'], self.rect['y1'] = x_orig, y_orig
+                    self.rect['x1'], self.rect['y1'] = x, y
                 elif self.handle == 'tr':
-                    self.rect['x2'], self.rect['y1'] = x_orig, y_orig
+                    self.rect['x2'], self.rect['y1'] = x, y
                 elif self.handle == 'br':
-                    self.rect['x2'], self.rect['y2'] = x_orig, y_orig
+                    self.rect['x2'], self.rect['y2'] = x, y
                 elif self.handle == 'bl':
-                    self.rect['x1'], self.rect['y2'] = x_orig, y_orig
+                    self.rect['x1'], self.rect['y2'] = x, y
                 self.normalize_rect()
         
         elif event == cv2.EVENT_LBUTTONUP:
+            if self.dragging:
+                logger.debug(f"Finalizado arrastrar {self.handle}")
             self.dragging = False
             self.handle = None
     
     def calibrate(self) -> np.ndarray:
-        """Ejecutar la interfaz de calibración."""
+        """Ejecutar la interfaz de calibración completamente reactiva."""
         logger.info("="*70)
         logger.info(" "*10 + "CALIBRACIÓN DE CAMPO - FUTSAL")
         logger.info("="*70)
         logger.info("Instrucciones:")
-        logger.info("  1. Arrastra las esquinas (puntos amarillos) para ajustar el rectángulo")
-        logger.info("  2. El rectángulo debe coincidir con los límites del campo de futsal")
-        logger.info("  3. Presiona ESPACIO cuando hayas terminado")
-        logger.info("  4. Presiona R para resetear a los valores por defecto")
+        logger.info("  1. Los puntos amarillos en las esquinas son ARRASTABLES")
+        logger.info("  2. Arrastra cada esquina hasta los límites reales del campo")
+        logger.info("  3. Puedes mover el rectángulo fuera de la imagen si lo necesitas")
+        logger.info("  4. Presiona ESPACIO cuando hayas terminado")
+        logger.info("  5. Presiona R para resetear a los valores por defecto")
         logger.info("="*70 + "\n")
         
         cv2.namedWindow(self.WIN, cv2.WINDOW_NORMAL)
@@ -261,14 +268,13 @@ class FieldCalibrator:
             if key == ord(' '):  # ESPACIO
                 logger.info("✓ Calibración confirmada\n")
                 break
-            elif key == ord('r'):  # R para resetear
-                disp_w, disp_h = self.disp.shape[1], self.disp.shape[0]
-                margin = 100
+            elif key == ord('r') or key == ord('R'):  # R para resetear
+                margin = max(100, int(min(self.w, self.h) * 0.1))
                 self.rect = {
-                    'x1': int(margin / self.scale),
-                    'y1': int(margin / self.scale),
-                    'x2': int((disp_w - margin) / self.scale),
-                    'y2': int((disp_h - margin) / self.scale)
+                    'x1': margin,
+                    'y1': margin,
+                    'x2': self.w - margin,
+                    'y2': self.h - margin
                 }
                 logger.info("Rectángulo reseteado a valores por defecto")
             elif key == 27:  # ESC
@@ -277,7 +283,7 @@ class FieldCalibrator:
         
         cv2.destroyAllWindows()
         
-        # Retornar los puntos en formato array (convertir rectángulo a puntos para compatibilidad)
+        # Retornar los puntos en formato array
         return np.array([
             [self.rect['x1'], self.rect['y1']],
             [self.rect['x2'], self.rect['y1']],
@@ -501,6 +507,58 @@ class PositionSmoother:
         return np.mean(self.buffers[track_id], axis=0)
 
 
+# ===================== BALL TRACKER =====================
+
+class BallTracker:
+    """
+    Rastreador de balón simple usando centroide más cercano frame a frame.
+    """
+    
+    def __init__(self, max_distance: float = 100):
+        """
+        Inicializar rastreador de balón.
+        
+        Args:
+            max_distance: Distancia máxima entre frames para considerar mismo balón
+        """
+        self.last_pos: Optional[np.ndarray] = None
+        self.max_distance = max_distance
+        self.ball_seen_count = 0
+        self.ball_positions: List[np.ndarray] = []
+    
+    def update(self, current_pos: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """
+        Actualizar posición del balón con suavizado temporal.
+        
+        Args:
+            current_pos: Posición actual del balón o None
+            
+        Returns:
+            Posición rastreada o None
+        """
+        if current_pos is None:
+            self.last_pos = None
+            return None
+        
+        # Validar continuidad del balón
+        if self.last_pos is not None:
+            distance = np.linalg.norm(current_pos - self.last_pos)
+            if distance > self.max_distance:
+                logger.debug(f"Posible desconexión de balón (distancia: {distance:.1f})")
+                self.ball_positions = []
+        
+        self.last_pos = current_pos.copy()
+        self.ball_seen_count += 1
+        
+        # Mantener historial de posiciones
+        self.ball_positions.append(current_pos.copy())
+        if len(self.ball_positions) > 5:
+            self.ball_positions = self.ball_positions[-5:]
+        
+        # Retornar promedio de últimas posiciones (suavizado)
+        return np.mean(self.ball_positions, axis=0)
+
+
 # ===================== TACTICAL BOARD =====================
 
 class TacticalBoard:
@@ -701,10 +759,12 @@ def process_frame(frame: np.ndarray,
                   mapper: SimpleFieldMapper,
                   field_validator: FieldValidator,
                   board_drawer: TacticalBoard,
+                  ball_tracker: BallTracker,
                   config: Config,
                   fps: float) -> Tuple[np.ndarray, np.ndarray]:
     """
     Procesar un frame: detectar, rastrear, clasificar, validar y renderizar.
+    Incluye rastreo de balón.
     """
     # Detección YOLO
     results = model.predict(
@@ -743,12 +803,15 @@ def process_frame(frame: np.ndarray,
             smooth = smoother.update(tid, mapped)
             players_frame.append((tid, smooth, team_id))
 
-    # Mapear posición de la pelota
-    mapped_ball: Optional[np.ndarray] = None
+    # Mapear y rastrear posición de la pelota
+    current_ball_pos: Optional[np.ndarray] = None
     if len(ball_dets) > 0:
         ball_center = ball_dets.get_anchors_coordinates(sv.Position.CENTER)[0]
         if field_validator.is_within_field(ball_center):
-            mapped_ball = mapper.transform(ball_center)
+            current_ball_pos = mapper.transform(ball_center)
+    
+    # Actualizar rastreador de balón
+    mapped_ball = ball_tracker.update(current_ball_pos)
 
     # Anotar frame de cámara
     annotated = frame.copy()
@@ -760,6 +823,13 @@ def process_frame(frame: np.ndarray,
         
         team_text = "ÁRBITRO" if team_id < 0 else f"EQUIPO {team_id}"
         cv2.putText(annotated, team_text, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+    
+    # Dibujar balón rastreado
+    if len(ball_dets) > 0:
+        ball_center = ball_dets.get_anchors_coordinates(sv.Position.CENTER)[0]
+        bx, by = int(ball_center[0]), int(ball_center[1])
+        cv2.circle(annotated, (bx, by), 8, (0, 165, 255), -1)
+        cv2.circle(annotated, (bx, by), 9, (255, 255, 255), 2)
 
     # Renderizar tablero táctico
     board_img = board_drawer.draw_state(players_frame, mapped_ball)
@@ -830,6 +900,7 @@ def main(cfg: Optional[Config] = None) -> None:
     board_drawer = TacticalBoard(cfg.board_width, cfg.board_height)
     classifier = TeamClassifier()
     smoother = PositionSmoother(cfg.smoothing_window)
+    ball_tracker = BallTracker(max_distance=150)
 
     model, tracker = setup_detectors(cfg)
     if model is None or tracker is None:
@@ -858,7 +929,7 @@ def main(cfg: Optional[Config] = None) -> None:
             try:
                 annotated, board_img = process_frame(
                     frame, model, tracker, classifier, smoother, mapper,
-                    field_validator, board_drawer, cfg, fps
+                    field_validator, board_drawer, ball_tracker, cfg, fps
                 )
             except Exception as e:
                 logger.error(f"Error procesando frame {frame_idx}: {e}")
