@@ -75,7 +75,8 @@ config = Config()
 def open_youtube_stream(url: str, config: Config) -> Optional[cv2.VideoCapture]:
     """
     Opens a YouTube video as an OpenCV VideoCapture by extracting the direct
-    stream URL via yt-dlp. Tries 720p, 480p, 360p in order.
+    stream URL via yt-dlp. Tries to get the best available quality first,
+    then falls back to lower qualities if needed.
     
     Args:
         url: YouTube video URL
@@ -84,7 +85,7 @@ def open_youtube_stream(url: str, config: Config) -> Optional[cv2.VideoCapture]:
     Returns:
         cv2.VideoCapture if successful, None otherwise.
     """
-    formats = ["best[height<=720]", "best[height<=480]", "best[height<=360]"]
+    formats = ["best", "best[height<=1080]", "best[height<=720]", "best[height<=480]", "best[height<=360]"]
     
     for fmt in formats:
         try:
@@ -121,31 +122,88 @@ def open_youtube_stream(url: str, config: Config) -> Optional[cv2.VideoCapture]:
 
 # ===================== TEAM CLASSIFIER =====================
 
+# ===================== FIELD VALIDATOR =====================
+
+class FieldValidator:
+    """
+    Validates if detected players are within the playing field boundaries.
+    Uses convex hull of calibration points to define valid region.
+    """
+
+    def __init__(self, src_pts: np.ndarray):
+        """
+        Initialize field validator with calibration points.
+        
+        Args:
+            src_pts: Array of 6 calibration points (camera space)
+        """
+        if len(src_pts) != 6:
+            raise ValueError("Need exactly 6 calibration points")
+        
+        # Create convex hull from the 4 corner points (ignore midline points initially)
+        tl, tr, br, bl, mt, mb = src_pts
+        corners = np.array([tl, tr, br, bl], dtype=np.float32)
+        
+        # Calculate convex hull that encompasses the field
+        hull = cv2.convexHull(corners)
+        self.field_polygon = hull
+        logger.info(f"Field validator initialized with polygon: {hull.shape}")
+
+    def is_within_field(self, point: np.ndarray) -> bool:
+        """
+        Check if a point is within the field boundaries.
+        
+        Args:
+            point: Point [x, y] in camera space
+            
+        Returns:
+            True if point is within field polygon
+        """
+        point_array = np.array([[[point[0], point[1]]]], dtype=np.float32)
+        result = cv2.pointPolygonTest(self.field_polygon, point[:2], False)
+        return result >= 0
+
+    def filter_detections(self, detections: sv.Detections, feet_coords: np.ndarray) -> np.ndarray:
+        """
+        Filter detections to keep only those within the field.
+        
+        Args:
+            detections: Supervision detections
+            feet_coords: Feet coordinates (anchors) for each detection
+            
+        Returns:
+            Boolean mask of valid detections
+        """
+        valid_mask = np.array([self.is_within_field(foot) for foot in feet_coords])
+        return valid_mask
+
+
 # ===================== TEAM CLASSIFIER =====================
 
 class TeamClassifier:
     """
     Separates players into two teams using K-Means clustering on jersey colour.
 
-    Uses HSV colour space instead of BGR: hue is consistent under varying
-    lighting conditions, making classification more robust to shadows and
-    brightness differences across the pitch.
-
-    Uses 3 clusters (not 2) to account for the referee, whose jersey colour
-    typically differs from both teams. The smallest cluster is identified as
-    the referee and assigned team ID -1, excluding it from all KPI computation.
+    Uses HSV colour space with enhanced feature extraction:
+    - Hue: Primary color identifier
+    - Saturation: Excludes reflections and shadows
+    - Value: Brightness normalization
+    
+    Uses 3 clusters to account for referee (smallest cluster = -1 team).
     
     Attributes:
         kmeans: KMeans clusterer instance
         trained: Whether classification model has been fitted
         ref_label: Cluster label assigned to the referee
+        color_features: Extracted HSV features for analysis
     """
 
-    def __init__(self, n_clusters: int = 3, n_init: int = 10):
-        """Initialize the classifier with default hyperparameters."""
+    def __init__(self, n_clusters: int = 3, n_init: int = 20):
+        """Initialize the classifier with enhanced hyperparameters."""
         self.kmeans: KMeans = KMeans(n_clusters=n_clusters, n_init=n_init, random_state=42)
         self.trained: bool = False
         self.ref_label: Optional[int] = None
+        self.color_features: Optional[np.ndarray] = None
 
     @staticmethod
     def _safe_crop(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> np.ndarray:
@@ -157,16 +215,17 @@ class TeamClassifier:
             return np.zeros((1, 1, 3), dtype=frame.dtype)
         return frame[y1:y2, x1:x2]
 
-    def get_jersey_color(self, frame: np.ndarray, bbox: np.ndarray) -> np.ndarray:
+    def get_jersey_color_features(self, frame: np.ndarray, bbox: np.ndarray) -> np.ndarray:
         """
-        Extract mean HSV colour of the upper 40% of the bounding box (shirt region).
+        Extract enhanced HSV features from jersey region.
+        Uses upper 40% of bounding box (shirt area) and filters by saturation.
         
         Args:
             frame: Input image frame
             bbox: Bounding box [x1, y1, x2, y2]
             
         Returns:
-            HSV color vector as float32 array
+            Feature vector [hue, saturation, value] as float32
         """
         x1, y1, x2, y2 = map(int, bbox)
         jersey_h = int((y2 - y1) * 0.4)
@@ -175,7 +234,24 @@ class TeamClassifier:
         if crop.size == 0:
             return np.array([0, 0, 0], dtype=np.float32)
         
-        return np.mean(cv2.cvtColor(crop, cv2.COLOR_BGR2HSV), axis=(0, 1)).astype(np.float32)
+        # Convert to HSV
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV).astype(np.float32)
+        
+        # Filter pixels by saturation (exclude very desaturated pixels = reflections)
+        saturation_mask = hsv[:, :, 1] > 30  # Min saturation threshold
+        
+        if saturation_mask.sum() < 5:
+            # Fallback if too few saturated pixels
+            return np.mean(hsv, axis=(0, 1)).astype(np.float32)
+        
+        # Calculate mean of saturated pixels only
+        filtered_hsv = hsv[saturation_mask]
+        features = np.mean(filtered_hsv, axis=0).astype(np.float32)
+        
+        # Normalize hue to [0, 180] range
+        features[0] = np.clip(features[0], 0, 180)
+        
+        return features
 
     def train_teams(self, frame: np.ndarray, detections: sv.Detections, config: Config) -> bool:
         """
@@ -191,25 +267,41 @@ class TeamClassifier:
             True if training succeeded, False otherwise
         """
         if len(detections) < config.min_players_for_kmeans:
+            logger.debug(f"Not enough players ({len(detections)}) for training")
             return False
         
         try:
-            colors = np.array(
-                [self.get_jersey_color(frame, b) for b in detections.xyxy],
+            # Extract enhanced color features
+            color_features = np.array(
+                [self.get_jersey_color_features(frame, b) for b in detections.xyxy],
                 dtype=np.float32
             )
             
-            # Skip if all colors are identical (no variation)
-            if np.allclose(colors.max(axis=0), colors.min(axis=0)):
-                logger.warning("All players have identical jersey colors - skipping training")
+            self.color_features = color_features
+            
+            # Check color variance
+            hue_var = np.var(color_features[:, 0])
+            sat_var = np.var(color_features[:, 1])
+            
+            if hue_var < 50:
+                logger.warning("Insufficient color variance for team classification")
                 return False
             
-            self.kmeans.fit(colors)
+            # Fit K-Means
+            self.kmeans.fit(color_features)
             self.trained = True
+            
+            # Assign referee as smallest cluster
             counts = np.bincount(self.kmeans.labels_)
             self.ref_label = int(np.argmin(counts))
             
-            logger.info(f"Team classifier trained. Referee cluster: {self.ref_label} (cluster sizes: {counts})")
+            logger.info(
+                f"Team classifier trained successfully. "
+                f"Referee cluster: {self.ref_label} | "
+                f"Cluster sizes: {counts} | "
+                f"Hue variance: {hue_var:.1f} | "
+                f"Saturation variance: {sat_var:.1f}"
+            )
             return True
             
         except Exception as e:
@@ -231,9 +323,8 @@ class TeamClassifier:
             return 0
         
         try:
-            label = int(self.kmeans.predict(
-                self.get_jersey_color(frame, bbox).reshape(1, -1)
-            )[0])
+            features = self.get_jersey_color_features(frame, bbox)
+            label = int(self.kmeans.predict(features.reshape(1, -1))[0])
             
             if label == self.ref_label:
                 return -1
@@ -513,26 +604,61 @@ class TacticalBoard:
         self.height: int = height
 
     def _draw_pitch(self, board: np.ndarray) -> None:
-        """Draw pitch markings on the tactical board."""
-        # Pitch boundary
-        cv2.rectangle(board, (0, 0), (self.width - 1, self.height - 1), (255, 255, 255), 3)
+        """Draw professional pitch markings on the tactical board."""
+        line_color = (255, 255, 255)
+        center_x = self.width // 2
+        center_y = self.height // 2
         
-        # Halfway line
-        cv2.line(board, (self.width // 2, 0), (self.width // 2, self.height), (255, 255, 255), 2)
+        # Pitch boundary (outer touchlines and goal lines) - thick lines
+        cv2.rectangle(board, (0, 0), (self.width - 1, self.height - 1), line_color, 3)
         
-        # Centre spot
-        cv2.circle(board, (self.width // 2, self.height // 2), 50, (255, 255, 255), 2)
+        # Halfway line (vertical center line)
+        cv2.line(board, (center_x, 0), (center_x, self.height), line_color, 2)
         
-        # Penalty areas
-        pa_w, pa_h = 120, 220
-        cy = self.height // 2
+        # Center spot (midfield)
+        cv2.circle(board, (center_x, center_y), 5, line_color, -1)
         
-        # Left penalty area
-        cv2.rectangle(board, (0, cy - pa_h // 2), (pa_w, cy + pa_h // 2), (200, 200, 200), 1)
+        # Center circle
+        cv2.circle(board, (center_x, center_y), 75, line_color, 2)
         
-        # Right penalty area
-        cv2.rectangle(board, (self.width - pa_w, cy - pa_h // 2),
-                      (self.width, cy + pa_h // 2), (200, 200, 200), 1)
+        # Penalty areas dimensions (professional proportions)
+        pen_box_w, pen_box_h = 150, 240
+        goal_box_w, goal_box_h = 50, 90
+        
+        # Left side boxes
+        left_pen_y1 = center_y - pen_box_h // 2
+        left_pen_y2 = center_y + pen_box_h // 2
+        left_goal_y1 = center_y - goal_box_h // 2
+        left_goal_y2 = center_y + goal_box_h // 2
+        
+        # Left penalty box
+        cv2.rectangle(board, (0, left_pen_y1), (pen_box_w, left_pen_y2), line_color, 2)
+        # Left goal area
+        cv2.rectangle(board, (0, left_goal_y1), (goal_box_w, left_goal_y2), line_color, 2)
+        # Left penalty spot
+        cv2.circle(board, (int(pen_box_w * 0.6), center_y), 4, line_color, -1)
+        
+        # Right side boxes
+        right_pen_y1 = center_y - pen_box_h // 2
+        right_pen_y2 = center_y + pen_box_h // 2
+        right_goal_y1 = center_y - goal_box_h // 2
+        right_goal_y2 = center_y + goal_box_h // 2
+        
+        # Right penalty box
+        cv2.rectangle(board, (self.width - pen_box_w, right_pen_y1), 
+                      (self.width, right_pen_y2), line_color, 2)
+        # Right goal area
+        cv2.rectangle(board, (self.width - goal_box_w, right_goal_y1), 
+                      (self.width, right_goal_y2), line_color, 2)
+        # Right penalty spot
+        cv2.circle(board, (self.width - int(pen_box_w * 0.6), center_y), 4, line_color, -1)
+        
+        # Corner arcs (quarter circles at corners)
+        corner_radius = 20
+        cv2.ellipse(board, (0, 0), (corner_radius, corner_radius), 0, 0, 90, line_color, 1)
+        cv2.ellipse(board, (self.width, 0), (corner_radius, corner_radius), 0, 90, 180, line_color, 1)
+        cv2.ellipse(board, (self.width, self.height), (corner_radius, corner_radius), 0, 180, 270, line_color, 1)
+        cv2.ellipse(board, (0, self.height), (corner_radius, corner_radius), 0, 270, 360, line_color, 1)
 
     def draw_state(self, 
                    players: List[Tuple[int, np.ndarray, int]], 
@@ -558,7 +684,7 @@ class TacticalBoard:
         # Draw pitch markings
         self._draw_pitch(board)
 
-        # Draw players
+        # Draw players (team-only visualization, no IDs)
         for track_id, pos, team_id in players:
             if team_id < 0:  # Skip referee
                 continue
@@ -570,19 +696,10 @@ class TacticalBoard:
             # Team color
             color = self.TEAM_COLORS[team_id % len(self.TEAM_COLORS)]
             
-            # Draw player circle and outline
-            cv2.circle(board, (x, y), 10, color, -1)
-            cv2.circle(board, (x, y), 11, (255, 255, 255), 1)
-            
-            # Draw player ID
-            cv2.putText(board, str(track_id), (x + 13, y + 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            
-            # Draw distance if available
-            if kpi_tracker and track_id in kpi_tracker.distance:
-                d = kpi_tracker.distance[track_id]
-                cv2.putText(board, f"{d:.0f}m", (x + 13, y + 17),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 255, 200), 1)
+            # Draw player circle with team color
+            cv2.circle(board, (x, y), 12, color, -1)
+            # White outline for better visibility
+            cv2.circle(board, (x, y), 12, (255, 255, 255), 2)
 
         # Draw ball
         if ball_mapped is not None:
@@ -601,6 +718,7 @@ class TacticalBoard:
 def select_points(frame: np.ndarray, config: Config) -> np.ndarray:
     """
     Shows the first video frame and lets the user click calibration points.
+    Professional interface with clear visual feedback and instructions.
     
     Click order:
         1=Top-Left  2=Top-Right  3=Bottom-Right  4=Bottom-Left
@@ -615,26 +733,95 @@ def select_points(frame: np.ndarray, config: Config) -> np.ndarray:
     """
     h, w = frame.shape[:2]
     scale = config.max_display_width / w if w > config.max_display_width else 1.0
-    disp = cv2.resize(frame, (int(w * scale), int(h * scale)))
+    disp = cv2.resize(frame, (int(w * scale), int(h * scale))).copy()
     pts: List[List[int]] = []
-    WIN = "Field Calibration"
+    WIN = "FIELD CALIBRATION - Court Point Selection"
+    
+    # Point labels and colors
+    point_labels = [
+        "Top-Left Corner",
+        "Top-Right Corner",
+        "Bottom-Right Corner",
+        "Bottom-Left Corner",
+        "Halfway Line (Top)",
+        "Halfway Line (Bottom)"
+    ]
+    point_colors = [
+        (0, 255, 0),      # Green for corners
+        (0, 255, 0),
+        (0, 255, 0),
+        (0, 255, 0),
+        (0, 165, 255),    # Orange for halfway line
+        (0, 165, 255)
+    ]
+
+    def draw_instructions(image: np.ndarray, current_step: int) -> np.ndarray:
+        """Add professional instructions overlay."""
+        img = image.copy()
+        overlay = img.copy()
+        
+        # Semi-transparent dark background for text area
+        cv2.rectangle(overlay, (0, 0), (disp.shape[1], 110), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.4, img, 0.6, 0, img)
+        
+        # Title
+        cv2.putText(img, "COURT CALIBRATION", (15, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+        
+        # Current instruction
+        instruction = f"Step {current_step + 1}/6: Click on {point_labels[current_step]}"
+        cv2.putText(img, instruction, (15, 65),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, point_colors[current_step], 2)
+        
+        # Status bar at bottom
+        progress_text = f"Progress: {current_step}/{config.num_calib_points}  |  Press ESC to cancel"
+        cv2.putText(img, progress_text, (15, img.shape[0] - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        
+        return img
 
     def on_click(event, x, y, flags, param) -> None:
-        """Mouse callback for point selection."""
+        """Mouse callback for point selection with professional feedback."""
         if event == cv2.EVENT_LBUTTONDOWN and len(pts) < config.num_calib_points:
             pts.append([int(x / scale), int(y / scale)])
-            cv2.circle(disp, (x, y), 6, (0, 0, 255), -1)
-            cv2.putText(disp, str(len(pts)), (x + 8, y - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            cv2.imshow(WIN, disp)
+            idx = len(pts) - 1
+            
+            # Draw point marker
+            cv2.circle(disp, (x, y), 10, point_colors[idx], -1)
+            cv2.circle(disp, (x, y), 11, (255, 255, 255), 2)
+            
+            # Draw point number in a box
+            cv2.rectangle(disp, (x - 20, y - 30), (x + 20, y - 5), point_colors[idx], -1)
+            cv2.putText(disp, str(idx + 1), (x - 12, y - 13),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            
+            # Update display
+            display = draw_instructions(disp, len(pts))
+            cv2.imshow(WIN, display)
 
-    # Print calibration instructions
-    logger.info("Field calibration - Click the following points in order:")
-    logger.info("  1: Top-Left    2: Top-Right    3: Bottom-Right    4: Bottom-Left")
-    logger.info("  5: Halfway-Line Top    6: Halfway-Line Bottom")
-    logger.info("Window closes automatically after 6 clicks.\n")
+    # Print calibration instructions to console
+    logger.info("="*70)
+    logger.info(" "*15 + "FIELD CALIBRATION - PROFESSIONAL COURT SETUP")
+    logger.info("="*70)
+    logger.info("Click on the following court points in order:")
+    logger.info("")
+    logger.info("  CORNERS:")
+    logger.info("    1. Top-Left Corner           (top-left corner of the field)")
+    logger.info("    2. Top-Right Corner          (top-right corner of the field)")
+    logger.info("    3. Bottom-Right Corner       (bottom-right corner of the field)")
+    logger.info("    4. Bottom-Left Corner        (bottom-left corner of the field)")
+    logger.info("")
+    logger.info("  HALFWAY LINE:")
+    logger.info("    5. Halfway Line (Top)        (where midline meets top boundary)")
+    logger.info("    6. Halfway Line (Bottom)     (where midline meets bottom boundary)")
+    logger.info("-"*70)
+    logger.info("Window will close automatically after all points are selected.")
+    logger.info("Press ESC to cancel calibration.")
+    logger.info("="*70 + "\n")
 
-    cv2.imshow(WIN, disp)
+    # Initial display with first instruction
+    display = draw_instructions(disp, 0)
+    cv2.imshow(WIN, display)
     cv2.setMouseCallback(WIN, on_click)
 
     # Wait for user to select all points or press ESC
@@ -645,6 +832,10 @@ def select_points(frame: np.ndarray, config: Config) -> np.ndarray:
             break
 
     cv2.destroyAllWindows()
+    
+    if len(pts) == config.num_calib_points:
+        logger.info("✓ Calibration completed successfully!\n")
+    
     return np.array(pts, dtype=np.float32)
 
 
@@ -725,12 +916,13 @@ def process_frame(frame: np.ndarray,
                   classifier: TeamClassifier,
                   smoother: PositionSmoother,
                   transformer: PiecewiseTransformer,
+                  field_validator: 'FieldValidator',
                   kpi_tracker: KPITracker,
                   board_drawer: TacticalBoard,
                   config: Config,
                   fps: float) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Process a single frame: detect, track, classify, and render.
+    Process a single frame: detect, track, classify, validate, and render.
     
     Args:
         frame: Input video frame
@@ -739,6 +931,7 @@ def process_frame(frame: np.ndarray,
         classifier: Team classifier
         smoother: Position smoother
         transformer: Perspective transformer
+        field_validator: Field boundary validator
         kpi_tracker: KPI tracker
         board_drawer: Tactical board renderer
         config: Configuration object
@@ -758,6 +951,13 @@ def process_frame(frame: np.ndarray,
 
     player_dets = detections[detections.class_id == config.player_class_id]
     ball_dets = detections[detections.class_id == config.ball_class_id]
+
+    # 1.5 Filter players: keep only those within field boundaries
+    if len(player_dets) > 0:
+        feet_coords = player_dets.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+        valid_mask = field_validator.filter_detections(player_dets, feet_coords)
+        player_dets = player_dets[valid_mask]
+        logger.debug(f"Filtered {np.sum(~valid_mask)} players outside field")
 
     # 2. ByteTrack for persistent IDs
     tracked = tracker.update_with_detections(player_dets)
@@ -781,7 +981,8 @@ def process_frame(frame: np.ndarray,
     mapped_ball: Optional[np.ndarray] = None
     if len(ball_dets) > 0:
         ball_center = ball_dets.get_anchors_coordinates(sv.Position.CENTER)[0]
-        mapped_ball = transformer.transform(ball_center)
+        if field_validator.is_within_field(ball_center):
+            mapped_ball = transformer.transform(ball_center)
 
     # 6. Update KPI accumulators
     kpi_tracker.update(players_frame, mapped_ball, fps, config)
@@ -793,6 +994,10 @@ def process_frame(frame: np.ndarray,
         color = (128, 128, 128) if team_id < 0 else TacticalBoard.TEAM_COLORS[team_id % 2]
         x1, y1, x2, y2 = map(int, bbox)
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        
+        # Add team indicator text (no player ID)
+        team_text = "REF" if team_id < 0 else f"TEAM {team_id}"
+        cv2.putText(annotated, team_text, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
     # 8. Render tactical board
     board_img = board_drawer.draw_state(players_frame, mapped_ball, kpi_tracker, fps)
@@ -857,6 +1062,14 @@ def main(cfg: Optional[Config] = None) -> None:
         cap.release()
         return
 
+    # Initialize field validator
+    try:
+        field_validator = FieldValidator(source_points)
+    except Exception as e:
+        logger.error(f"Field validator setup failed: {e}")
+        cap.release()
+        return
+
     # Initialize components
     board_drawer = TacticalBoard(cfg.board_width, cfg.board_height)
     classifier = TeamClassifier()
@@ -890,7 +1103,7 @@ def main(cfg: Optional[Config] = None) -> None:
             try:
                 annotated, board_img = process_frame(
                     frame, model, tracker, classifier, smoother, transformer,
-                    kpi_tracker, board_drawer, cfg, fps
+                    field_validator, kpi_tracker, board_drawer, cfg, fps
                 )
             except Exception as e:
                 logger.error(f"Error processing frame {frame_idx}: {e}")

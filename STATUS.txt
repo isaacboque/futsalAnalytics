@@ -1,0 +1,127 @@
+"""
+RESUMEN DE ESTADO - futsal_analyzer.py
+
+Status: OK FUNCIONANDO CORRECTAMENTE
+
+El programa futsal_analyzer.py esta completamente funcional con todas las 
+caracteristicas integradas, incluyendo:
+
+[OK] Calibrador con 6 puntos completamente libres
+[OK] Interfaz reactiva a clicks del raton
+[OK] Renderizado de poligono dinamico
+[OK] Validador de campo usando poligonos
+[OK] Mapeo de perspectiva de camara a tablero
+[OK] Soporte para streams de YouTube
+[OK] Tracking de jugadores y pelota
+
+COMO EJECUTAR:
+==============
+
+1. Abre una terminal PowerShell o CMD
+2. Navega a: C:\Users\isboq\OneDrive\Escriptori\IAFS
+3. Ejecuta: python futsal_analyzer.py
+
+4. Te pedira: "Ingresa URL de YouTube:"
+   Pega la URL del video (ej: https://www.youtube.com/live/gW3EX3QS64s)
+
+5. Te pedira: "Minuto de inicio (MM:SS, Enter para saltar):"
+   Escribe 02:30 para empezar a los 2:30, o presiona Enter
+
+6. SE ABRIRA LA VENTANA DE CALIBRACIÓN con 6 puntos amarillos
+
+DURANTE CALIBRACIÓN:
+====================
+
+Los 6 puntos se pueden mover COMPLETAMENTE LIBRES para adaptarse al angulo 
+de camara.
+
+Controles durante calibración:
+  - Mouse: Clic sobre un punto y arrastra para moverlo
+  - ESPACIO: Confirmar calibración
+  - R: Resetear puntos a posición por defecto
+  - ESC: Cancelar y salir
+
+Los 6 puntos son:
+  1. TL (Top-Left) - Arriba izquierda
+  2. TR (Top-Right) - Arriba derecha
+  3. BR (Bottom-Right) - Abajo derecha
+  4. BL (Bottom-Left) - Abajo izquierda
+  5. CL (Center-Left) - Centro izquierda
+  6. CR (Center-Right) - Centro derecha
+
+COMPORTAMIENTO:
+===============
+
+[OK] Polylines correcto (cv2.fillPoly en lugar de cv2.polylines con -1)
+[OK] Unicode encoding solucionado (usa ASCII en lugar de caracteres especiales)
+[OK] Carga lazy de dependencias pesadas (ultralytics, supervision)
+[OK] Importación correcta sin errores de módulos
+
+PROXIMOS PASOS DESPUES DE CALIBRACIÓN:
+================================
+
+Una vez confirmes la calibración (ESPACIO), el programa:
+
+1. Inicializa YOLO y ByteTrack
+2. Comienza a procesar frames del video
+3. Detecta y rastrea jugadores
+4. Clasifica equipos por color de camiseta
+5. Valida posiciones dentro del campo
+6. Mapea a tablero táctico
+7. Rastrea el balon
+8. Muestra en pantalla:
+   - "Vista Camara": Anotaciones en video original
+   - "Tablero Táctico": Vista overhead del campo
+
+Presiona Q durante el analisis para detener.
+
+REQUISITOS:
+===========
+
+[OK] Python 3.11
+[OK] opencv-python (cv2)
+[OK] numpy
+[OK] ultralytics (YOLO)
+[OK] supervision (ByteTrack)
+[OK] scikit-learn (KMeans)
+[OK] yt-dlp (para YouTube)
+
+STATUS: LISTO PARA USAR
+
+CAMBIOS REALIZADOS:
+===================
+
+1. Creado calibrador con 6 puntos independientes
+   - Cada punto se mueve libremente en X, Y
+   - Forman un poligono dinamico que se adapta al campo
+
+2. Corregido error de cv2.polylines
+   - Cambio a cv2.fillPoly para relleno
+
+3. Solucionado problema de encoding Unicode
+   - Remplazo de caracteres especiales por ASCII
+
+4. Optimizacion de imports
+   - Carga lazy de dependencias pesadas
+
+5. Integracion completamente funcional
+   - Calibrador + Validator + Mapper + Tracker
+   - Todo funciona en el primer frame del video
+
+PRUEBAS REALIZADAS:
+===================
+
+[OK] test_field_simple.py - Calibrador aislado
+[OK] test_calibrador_libre.py - Puntos libres
+[OK] test_integracion_full.py - Integración completa
+[OK] test_full_flow.py - Flujo completo
+[OK] test_with_url.py - Con stream real de YouTube
+
+RESULTADO FINAL:
+================
+
+El programa futsal_analyzer.py está completamente funcional y listo para usar.
+Presiona Ctrl+C para cancelar esta ejecución.
+"""
+
+print(__doc__)
