@@ -975,29 +975,81 @@ def process_frame(frame: np.ndarray,
     return annotated, board_img
 
 
+# ===================== USER INTERFACE =====================
+
+def show_welcome():
+    """Show welcome banner and return user inputs."""
+    print("\n")
+    print("╔" + "="*68 + "╗")
+    print("║" + " "*68 + "║")
+    print("║" + "FUTSAL ANALYTICS - REAL-TIME TEAM ANALYSIS".center(68) + "║")
+    print("║" + "Análisis de Futsal con Detección de Equipos".center(68) + "║")
+    print("║" + " "*68 + "║")
+    print("╚" + "="*68 + "╝")
+    print("\n")
+
+def get_video_url() -> Optional[str]:
+    """Get YouTube video URL from user with validation."""
+    while True:
+        print("📺 YOUTUBE VIDEO URL")
+        print("-" * 70)
+        print("Examples:")
+        print("  • https://www.youtube.com/watch?v=VIDEO_ID")
+        print("  • https://www.youtube.com/live/STREAM_ID")
+        print()
+        url = input("Enter YouTube URL (or 'q' to quit): ").strip()
+        
+        if url.lower() == 'q':
+            return None
+        
+        if not url:
+            print("❌ URL cannot be empty. Try again.\n")
+            continue
+        
+        if "youtube.com" not in url and "youtu.be" not in url:
+            print("❌ Not a valid YouTube URL. Try again.\n")
+            continue
+        
+        print(f"✅ URL accepted: {url[:50]}...\n")
+        return url
+
+def get_start_time() -> str:
+    """Get optional start time from user."""
+    print("⏱️  START TIME (Optional)")
+    print("-" * 70)
+    print("Format: MM:SS (e.g., 02:30 for 2 minutes 30 seconds)")
+    print("Press ENTER to start from the beginning")
+    print()
+    time_str = input("Start time: ").strip()
+    
+    if time_str:
+        print(f"✅ Starting from: {time_str}\n")
+    else:
+        print("✅ Starting from the beginning\n")
+    
+    return time_str
+
+
 # ===================== MAIN =====================
 
 def main(cfg: Optional[Config] = None) -> None:
     """Pipeline principal de análisis."""
     cfg = cfg or Config()
     
-    # Obtener input del usuario
-    print("\n" + "="*70)
-    print(" "*15 + "ANALIZADOR DE FUTSAL - CÁMARA LATERAL")
-    print("="*70 + "\n")
+    # Show welcome and get user inputs
+    show_welcome()
     
     logger.info("["*10 + "STARTUP" + "]"*10)
     logger.info(f"Config: {cfg}")
     
-    url = input("Ingresa URL de YouTube: ").strip()
-    if not url:
-        logger.error("URL vacía - abortando")
+    # Get URL from user
+    url = get_video_url()
+    if url is None:
+        logger.warning("User cancelled operation")
         return
     
-    logger.info(f"URL ingresada: {url[:60]}...")
-
-    start_time_str = input("Minuto de inicio (MM:SS, Enter para saltar): ").strip()
-    logger.info(f"Tiempo de inicio: {start_time_str if start_time_str else 'Desde el principio'}")
+    # Get optional start time
+    start_time_str = get_start_time()
     
     # Abrir stream
     logger.info("[STREAM] Abriendo stream de YouTube...")
@@ -1127,12 +1179,21 @@ def main(cfg: Optional[Config] = None) -> None:
     finally:
         cap.release()
         cv2.destroyAllWindows()
-        logger.info("="*70)
-        logger.info(f"ANÁLISIS COMPLETADO")
-        logger.info(f"  - Frames procesados: {frame_idx}")
-        logger.info(f"  - Tiempo total: {time.time() - t_start:.1f}s")
-        logger.info(f"  - FPS promedio: {frame_idx / (time.time() - t_start):.1f}")
-        logger.info("="*70)
+        
+        # Show completion summary
+        elapsed = time.time() - t_start
+        fps_avg = frame_idx / elapsed if elapsed > 0 else 0
+        
+        print("\n")
+        print("╔" + "="*68 + "╗")
+        print("║" + "✅ ANÁLISIS COMPLETADO".center(68) + "║")
+        print("║" + " "*68 + "║")
+        print("║" + f"📊 Frames Procesados: {frame_idx}".ljust(68) + "║")
+        print("║" + f"⏱️  Tiempo Total: {elapsed:.1f}s".ljust(68) + "║")
+        print("║" + f"🎬 FPS Promedio: {fps_avg:.1f}".ljust(68) + "║")
+        print("║" + " "*68 + "║")
+        print("╚" + "="*68 + "╝")
+        print()
 
 
 if __name__ == "__main__":
