@@ -6,24 +6,22 @@ Detección y clasificación de equipos con validación de jugadores dentro del c
 
 import cv2
 import numpy as np
-import supervision as sv
-from ultralytics import YOLO
-from sklearn.cluster import KMeans
 from collections import defaultdict, deque
-import csv
 import time
-import os
 import subprocess
-import sys
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any
+
+# Imports pesados - se cargarán después de FieldCalibrator
+# import supervision as sv
+# from ultralytics import YOLO
+# from sklearn.cluster import KMeans
 
 # ===================== LOGGING SETUP =====================
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="[%(levelname)s] %(message)s"
 )
 logger = logging.getLogger(__name__)
@@ -37,7 +35,6 @@ class Config:
     model_name: str = "yolo11n.pt"
     board_width: int = 1000
     board_height: int = 500
-    max_display_width: int = 1280
     
     player_class_id: int = 0
     ball_class_id: int = 32
@@ -52,7 +49,6 @@ class Config:
     yolo_conf_threshold: float = 0.3
     track_activation_threshold: float = 0.25
     
-    output_csv: str = "analisis_futsal.csv"
     stream_read_retries: int = 30
     stream_read_delay: float = 0.3
     yt_dlp_timeout: int = 30
@@ -119,101 +115,137 @@ def open_youtube_stream(url: str, config: Config) -> Optional[cv2.VideoCapture]:
 
 class FieldCalibrator:
     """
-    Sistema de calibración por rectángulo ajustable para definir los límites del campo.
-    Permite dibujar y ajustar un rectángulo que representa el área del futsal.
+    Sistema de calibración por 6 puntos independientes para definir los límites del campo.
+    Permite ajustar libremente cada punto para adaptarse al ángulo de cámara.
     """
     
     def __init__(self, frame: np.ndarray):
-        """Inicializa el calibrador."""
+        """Inicializa el calibrador con 6 puntos independientes."""
         self.frame = frame.copy()
         self.h, self.w = frame.shape[:2]
         
-        # Inicializar rectángulo por defecto (área central del frame)
-        margin = max(100, int(min(self.w, self.h) * 0.1))
-        self.x1 = margin
-        self.y1 = margin
-        self.x2 = self.w - margin
-        self.y2 = self.h - margin
+        # Canvas con padding para mostrar el frame centrado
+        self.padding = max(200, int(self.h * 0.3))  # 30% de padding o mínimo 200px
+        self.canvas_w = self.w + 2 * self.padding
+        self.canvas_h = self.h + 2 * self.padding
+        self.offset_x = self.padding
+        self.offset_y = self.padding
         
+        # Inicializar 6 puntos como trapezio irregular: [TL, CT, TR, BR, CB, BL]
+        # Puntos como array de coordenadas (x, y)
+        margin_x = int(self.w * 0.1)
+        margin_y = int(self.h * 0.15)
+        cx = self.w // 2
+        
+        self.points = np.array([
+            [margin_x, margin_y],                    # 0: TL (Top-Left)
+            [cx, margin_y],                          # 1: CT (Central Top)
+            [self.w - margin_x, margin_y],           # 2: TR (Top-Right)
+            [self.w - margin_x, self.h - margin_y],  # 3: BR (Bottom-Right)
+            [cx, self.h - margin_y],                 # 4: CB (Central Bottom)
+            [margin_x, self.h - margin_y],           # 5: BL (Bottom-Left)
+        ], dtype=np.float32)
+        
+        # Estados para el mouse
         self.dragging = False
-        self.active_corner = None
+        self.active_point = None
         self.WIN = "Calibración de Campo"
     
     def draw_frame(self) -> np.ndarray:
-        """Dibuja el frame con el rectángulo."""
-        img = self.frame.copy()
+        """Dibuja el frame con el polígono y 6 puntos de control, centrado en un canvas."""
+        # Crear canvas gris
+        canvas = np.full((self.canvas_h, self.canvas_w, 3), (80, 80, 80), dtype=np.uint8)
         
-        # Oscurecer área fuera del rectángulo
-        overlay = img.copy()
-        cv2.rectangle(overlay, (0, 0), (self.w, self.h), (0, 0, 0), -1)
-        cv2.rectangle(overlay, (self.x1, self.y1), (self.x2, self.y2), (50, 100, 50), -1)
-        cv2.addWeighted(overlay, 0.4, img, 0.6, 0, img)
+        # Colocar el frame en el centro del canvas
+        canvas[self.offset_y:self.offset_y + self.h, self.offset_x:self.offset_x + self.w] = self.frame.copy()
         
-        # Dibujar rectángulo principal con línea gruesa
-        cv2.rectangle(img, (self.x1, self.y1), (self.x2, self.y2), (0, 255, 0), 5)
+        # Convertir puntos a enteros para dibujar (sumar offset al canvas)
+        pts = (self.points + np.array([self.offset_x, self.offset_y])).astype(np.int32)
         
-        # Dibujar asas (esquinas) grandes y claras
-        handle_size = 25
+        # Oscurecer área fuera del polígono
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (self.offset_x, self.offset_y), 
+                     (self.offset_x + self.w, self.offset_y + self.h), (0, 0, 0), -1)
+        cv2.fillPoly(overlay, [pts], (50, 100, 50))
+        cv2.addWeighted(overlay, 0.4, canvas, 0.6, 0, canvas)
+        
+        # Dibujar frame border
+        cv2.rectangle(canvas, (self.offset_x, self.offset_y), 
+                     (self.offset_x + self.w - 1, self.offset_y + self.h - 1), (200, 200, 200), 2)
+        
+        # Dibujar polígono con líneas
+        for i in range(len(pts)):
+            next_i = (i + 1) % len(pts)
+            cv2.line(canvas, tuple(pts[i]), tuple(pts[next_i]), (0, 255, 0), 3)
+        
+        # Dibujar línea central (entre CL y CR)
+        if len(pts) >= 6:
+            cv2.line(canvas, tuple(pts[4]), tuple(pts[5]), (0, 200, 200), 2, cv2.LINE_AA)
+        
+        # Dibujar 6 puntos de control
+        handle_size = 12
         thickness = 3
-        handles = [
-            (self.x1, self.y1),  # arriba-izquierda
-            (self.x2, self.y1),  # arriba-derecha
-            (self.x2, self.y2),  # abajo-derecha
-            (self.x1, self.y2),  # abajo-izquierda
-        ]
+        labels = ["TL", "CT", "TR", "BR", "CB", "BL"]
         
-        for i, (x, y) in enumerate(handles):
-            cv2.circle(img, (x, y), handle_size, (0, 255, 255), -1)
-            cv2.circle(img, (x, y), handle_size, (255, 255, 255), thickness)
+        for idx, (pt, label) in enumerate(zip(pts, labels)):
+            x, y = int(pt[0]), int(pt[1])
+            
+            # Color diferente para punto activo
+            if self.active_point == idx and self.dragging:
+                cv2.circle(canvas, (x, y), handle_size, (0, 165, 255), -1)  # Naranja
+            else:
+                cv2.circle(canvas, (x, y), handle_size, (0, 255, 255), -1)  # Amarillo
+            
+            cv2.circle(canvas, (x, y), handle_size, (255, 255, 255), thickness)  # Borde blanco
+            
+            # Dibujar número del punto
+            cv2.putText(canvas, str(idx), (x-5, y+5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+            
+            # Etiqueta descriptiva
+            cv2.putText(canvas, label, (x-15, y-handle_size-10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         
-        return img
+        # Información en pantalla
+        info_text = "CLIC + ARRASTRAR puntos | ESPACIO: confirmar | R: resetear | ESC: cancelar"
+        cv2.putText(canvas, info_text, (self.offset_x + 10, self.offset_y + 25), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+        
+        return canvas
     
-    def get_corner_index(self, x: int, y: int) -> Optional[int]:
-        """Retorna el índice de la esquina más cercana si está dentro del threshold."""
-        corners = [
-            (self.x1, self.y1, 0),
-            (self.x2, self.y1, 1),
-            (self.x2, self.y2, 2),
-            (self.x1, self.y2, 3),
-        ]
-        
-        threshold = 40
-        for cx, cy, idx in corners:
-            dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+
+    def get_point_index(self, x: int, y: int):
+        """Retorna el índice del punto más cercano si está dentro del threshold."""
+        threshold = 25
+        for idx, pt in enumerate(self.points):
+            dist = np.sqrt((x - pt[0])**2 + (y - pt[1])**2)
             if dist < threshold:
                 return idx
-        
         return None
     
-    def update_corner(self, corner_idx: int, x: int, y: int):
-        """Actualiza la posición de una esquina."""
-        min_size = 50
-        
-        if corner_idx == 0:  # arriba-izquierda
-            self.x1 = max(0, min(x, self.x2 - min_size))
-            self.y1 = max(0, min(y, self.y2 - min_size))
-        elif corner_idx == 1:  # arriba-derecha
-            self.x2 = max(self.x1 + min_size, min(x, self.w))
-            self.y1 = max(0, min(y, self.y2 - min_size))
-        elif corner_idx == 2:  # abajo-derecha
-            self.x2 = max(self.x1 + min_size, min(x, self.w))
-            self.y2 = max(self.y1 + min_size, min(y, self.h))
-        elif corner_idx == 3:  # abajo-izquierda
-            self.x1 = max(0, min(x, self.x2 - min_size))
-            self.y2 = max(self.y1 + min_size, min(y, self.h))
+    def update_point(self, point_idx: int, x: int, y: int):
+        """Actualiza la posición de un punto de control de forma completamente libre, incluso fuera del frame."""
+        self.points[point_idx] = [x, y]
     
     def calibrate(self) -> np.ndarray:
         """Ejecutar la interfaz de calibración."""
         print("\n" + "="*70)
         print("CALIBRACIÓN DE CAMPO - FUTSAL")
         print("="*70)
-        print("\nInstrucciones:")
-        print("  1. Haz CLIC en los puntos amarillos (esquinas)")
-        print("  2. ARRASTRA cada esquina hasta los límites del campo")
-        print("  3. Puedes mover fuera de los límites si es necesario")
-        print("  4. Los puntos se ajustarán en tiempo real")
-        print("\nControles:")
-        print("  - CLIC + ARRASTRAR en esquinas para ajustar")
+        print("\nPUNTOS A CALIBRAR (numerados):")
+        print("  0 = TL (Top-Left)        - Esquina arriba-izquierda")
+        print("  1 = CT (Central Top)     - Centro línea superior")
+        print("  2 = TR (Top-Right)       - Esquina arriba-derecha")
+        print("  3 = BR (Bottom-Right)    - Esquina abajo-derecha")
+        print("  4 = CB (Central Bottom)  - Centro línea inferior")
+        print("  5 = BL (Bottom-Left)     - Esquina abajo-izquierda")
+        print("\nINSTRUCCIONES:")
+        print("  • Ajusta cada punto a los límites reales del campo")
+        print("  • Los puntos pueden estar fuera del frame")
+        print("  • Espacio dentro del campo = área de juego válida")
+        print("  • Esperado: ~4 jugadores por equipo + árbitro")
+        print("\nCONTROLES:")
+        print("  - CLIC + ARRASTRAR en puntos para ajustar")
         print("  - ESPACIO para confirmar")
         print("  - R para resetear")
         print("  - ESC para cancelar")
@@ -221,59 +253,73 @@ class FieldCalibrator:
         
         cv2.namedWindow(self.WIN)
         
-        # Variables para el mouse callback
-        state = {'dragging': False, 'corner': None}
+        labels_map = {0: "TL", 1: "CT", 2: "TR", 3: "BR", 4: "CB", 5: "BL"}
         
         def mouse_event(event, x, y, flags, param):
-            """Maneja eventos del ratón."""
+            """Maneja eventos del ratón de forma robusta."""
+            # Convertir coordenadas del canvas a coordenadas del frame
+            frame_x = x - self.offset_x
+            frame_y = y - self.offset_y
+            
             if event == cv2.EVENT_LBUTTONDOWN:
-                corner_idx = self.get_corner_index(x, y)
-                if corner_idx is not None:
-                    state['dragging'] = True
-                    state['corner'] = corner_idx
-                    print(f"Arrastrando esquina {corner_idx}")
+                point_idx = self.get_point_index(frame_x, frame_y)
+                if point_idx is not None:
+                    self.dragging = True
+                    self.active_point = point_idx
+                    label = labels_map.get(point_idx, "?")
+                    print(f"  -> PUNTO {label} ({point_idx}) ACTIVO - Arrastrando...")
             
             elif event == cv2.EVENT_MOUSEMOVE:
-                if state['dragging'] and state['corner'] is not None:
-                    self.update_corner(state['corner'], x, y)
+                if self.dragging and self.active_point is not None:
+                    self.update_point(self.active_point, frame_x, frame_y)
             
             elif event == cv2.EVENT_LBUTTONUP:
-                state['dragging'] = False
-                state['corner'] = None
+                if self.dragging and self.active_point is not None:
+                    label = labels_map.get(self.active_point, "?")
+                    print(f"  [OK] Punto {label} ({self.active_point}) - LIBERADO")
+                self.dragging = False
+                self.active_point = None
         
-        # Registrar el callback
+        # Registrar el callback - CRÍTICO para la reactividad
         cv2.setMouseCallback(self.WIN, mouse_event)
         
-        print("Ventana abierta. Mueve los puntos amarillos.\n")
+        print("Ventana abierta. Mueve los 6 puntos amarillos.\n")
         
         while True:
             img = self.draw_frame()
             cv2.imshow(self.WIN, img)
             
-            key = cv2.waitKey(30) & 0xFF
+            # Usar waitKey sin tiempo límite para mejor captura de eventos
+            key = cv2.waitKey(50) & 0xFF
             
             if key == ord(' '):
-                print("✓ Calibración confirmada\n")
+                print("[OK] Calibración confirmada\n")
                 break
             elif key == ord('r') or key == ord('R'):
-                margin = max(100, int(min(self.w, self.h) * 0.1))
-                self.x1 = margin
-                self.y1 = margin
-                self.x2 = self.w - margin
-                self.y2 = self.h - margin
-                print("Rectángulo reseteado\n")
-            elif key == 27:
-                print("✗ Calibración cancelada\n")
+                # Resetear a posición por defecto
+                margin_x = int(self.w * 0.1)
+                margin_y = int(self.h * 0.15)
+                cx = self.w // 2
+                
+                self.points = np.array([
+                    [margin_x, margin_y],
+                    [cx, margin_y],
+                    [self.w - margin_x, margin_y],
+                    [self.w - margin_x, self.h - margin_y],
+                    [cx, self.h - margin_y],
+                    [margin_x, self.h - margin_y],
+                ], dtype=np.float32)
+                print("[OK] Puntos reseteados\n")
+            elif key == 27:  # ESC
+                print("[CANCEL] Calibración cancelada\n")
                 break
         
         cv2.destroyAllWindows()
         
-        return np.array([
-            [self.x1, self.y1],
-            [self.x2, self.y1],
-            [self.x2, self.y2],
-            [self.x1, self.y2],
-        ], dtype=np.float32)
+        # Retornar el polígono del campo (6 puntos que definen las líneas del campo)
+        # Estos puntos representan: TL, CT, TR, BR, CB, BL
+        # y definen la geometría exacta del campo para validación y transformación
+        return self.points.copy()
 
 
 # ===================== FIELD VALIDATOR =====================
@@ -285,22 +331,30 @@ class FieldValidator:
 
     def __init__(self, field_rect: np.ndarray):
         """
-        Inicializar validador de campo.
+        Inicializar validador de campo con el polígono exacto del campo.
         
         Args:
-            field_rect: Array de 4 puntos que definen el rectángulo del campo
+            field_rect: Array de 6 puntos que definen el polígono del campo
+                       Puntos: TL, CT, TR, BR, CB, BL
+                       que representan las líneas calibradas del campo
         """
-        if len(field_rect) != 4:
-            raise ValueError("Se necesitan exactamente 4 puntos")
+        if len(field_rect) < 6:
+            logger.warning(f"Se esperaban 6 puntos de calibración, se obtuvieron {len(field_rect)}")
+            if len(field_rect) < 4:
+                raise ValueError("Se necesitan al menos 4 puntos")
         
-        # Crear polígono convexo del rectángulo
-        self.field_polygon = cv2.convexHull(field_rect.astype(np.float32))
-        self.x_min = float(np.min(field_rect[:, 0]))
-        self.x_max = float(np.max(field_rect[:, 0]))
-        self.y_min = float(np.min(field_rect[:, 1]))
-        self.y_max = float(np.max(field_rect[:, 1]))
+        # Usar todos los puntos para crear el polígono exacto del campo
+        # Los 6 puntos definen las líneas del campo de forma precisa
+        self.field_polygon = field_rect.astype(np.float32)
         
-        logger.info(f"Validador de campo inicializado: [{self.x_min:.0f}, {self.y_min:.0f}] a [{self.x_max:.0f}, {self.y_max:.0f}]")
+        # Calcular bounding box para optimización
+        self.x_min = float(np.min(self.field_polygon[:, 0]))
+        self.x_max = float(np.max(self.field_polygon[:, 0]))
+        self.y_min = float(np.min(self.field_polygon[:, 1]))
+        self.y_max = float(np.max(self.field_polygon[:, 1]))
+        
+        logger.info(f"Validador de campo inicializado con polígono de {len(self.field_polygon)} puntos")
+        logger.debug(f"Bounding box: [{self.x_min:.0f}, {self.y_min:.0f}] a [{self.x_max:.0f}, {self.y_max:.0f}]")
 
     def is_within_field(self, point: np.ndarray) -> bool:
         """
@@ -322,9 +376,10 @@ class FieldValidator:
         result = cv2.pointPolygonTest(self.field_polygon, point[:2], False)
         return result >= 0
 
-    def filter_detections(self, detections: sv.Detections, feet_coords: np.ndarray) -> np.ndarray:
+    def filter_detections(self, detections, feet_coords: np.ndarray) -> np.ndarray:
         """
         Filtrar detecciones para mantener solo las dentro del campo.
+        Validación robusta: verifica centroide Y bounding box.
         
         Args:
             detections: Detecciones de supervision
@@ -333,8 +388,29 @@ class FieldValidator:
         Returns:
             Máscara booleana de detecciones válidas
         """
-        valid_mask = np.array([self.is_within_field(foot) for foot in feet_coords])
-        return valid_mask
+        valid_mask = []
+        
+        for i, foot in enumerate(feet_coords):
+            # Validación con el polígono preciso del campo calibrado
+            # La posición de los pies es el indicador principal
+            foot_valid = self.is_within_field(foot)
+            
+            # Validación secundaria: centroide de bbox
+            bbox = detections.xyxy[i]
+            center_x = (bbox[0] + bbox[2]) / 2
+            center_y = (bbox[1] + bbox[3]) / 2
+            center = np.array([center_x, center_y])
+            center_valid = self.is_within_field(center)
+            
+            # El jugador es válido si está dentro del polígono del campo
+            # (al menos los pies deben estar cerca del perímetro del campo)
+            is_valid = foot_valid or center_valid
+            valid_mask.append(is_valid)
+            
+            if not is_valid:
+                logger.debug(f"[FILTER] Jugador rechazado: foot={foot_valid}, center={center_valid}")
+        
+        return np.array(valid_mask)
 
 
 # ===================== TEAM CLASSIFIER =====================
@@ -346,7 +422,10 @@ class TeamClassifier:
 
     def __init__(self, n_clusters: int = 3, n_init: int = 20):
         """Inicializar el clasificador."""
-        self.kmeans: KMeans = KMeans(n_clusters=n_clusters, n_init=n_init, random_state=42)
+        # Importar KMeans lazily
+        from sklearn.cluster import KMeans
+        
+        self.kmeans = KMeans(n_clusters=n_clusters, n_init=n_init, random_state=42)
         self.trained: bool = False
         self.ref_label: Optional[int] = None
         self.color_features: Optional[np.ndarray] = None
@@ -391,7 +470,7 @@ class TeamClassifier:
         
         return features
 
-    def train_teams(self, frame: np.ndarray, detections: sv.Detections, config: Config) -> bool:
+    def train_teams(self, frame: np.ndarray, detections, config: Config) -> bool:
         """
         Entrenar clasificador K-Means en colores de camiseta.
         
@@ -404,10 +483,11 @@ class TeamClassifier:
             True si fue exitoso
         """
         if len(detections) < config.min_players_for_kmeans:
-            logger.debug(f"No hay suficientes jugadores ({len(detections)}) para entrenar")
+            logger.debug(f"[TRAIN] No suficientes jugadores ({len(detections)}/{config.min_players_for_kmeans})")
             return False
         
         try:
+            logger.info(f"[TRAIN] Extrayendo características de color de {len(detections)} jugadores...")
             color_features = np.array(
                 [self.get_jersey_color_features(frame, b) for b in detections.xyxy],
                 dtype=np.float32
@@ -417,25 +497,26 @@ class TeamClassifier:
             hue_var = np.var(color_features[:, 0])
             sat_var = np.var(color_features[:, 1])
             
+            logger.debug(f"[TRAIN] Varianza Hue: {hue_var:.2f} | Varianza Sat: {sat_var:.2f}")
+            
             if hue_var < 50:
-                logger.warning("Varianza de color insuficiente para clasificación de equipos")
+                logger.warning("[TRAIN] Varianza de color insuficiente para clasificación")
                 return False
             
+            logger.info("[TRAIN] Entrenando K-Means...")
             self.kmeans.fit(color_features)
             self.trained = True
             
             counts = np.bincount(self.kmeans.labels_)
             self.ref_label = int(np.argmin(counts))
             
-            logger.info(
-                f"Clasificador de equipos entrenado exitosamente. "
-                f"Árbitro: cluster {self.ref_label} | "
-                f"Tamaños: {counts}"
-            )
+            logger.info(f"[TRAIN] K-Means entrenado exitosamente")
+            logger.info(f"  - Árbitro detectado en cluster: {self.ref_label}")
+            logger.info(f"  - Distribución de clusters: {list(counts)}")
             return True
             
         except Exception as e:
-            logger.error(f"Error al entrenar equipos: {e}")
+            logger.error(f"[ERROR] Error entrenando equipos: {e}")
             return False
 
     def predict_team(self, frame: np.ndarray, bbox: np.ndarray) -> int:
@@ -468,27 +549,7 @@ class TeamClassifier:
 
 
 # ===================== POSITION SMOOTHER =====================
-
-class PositionSmoother:
-    """Suavizado de posición mediante promedio rodante."""
-
-    def __init__(self, window: int = 5):
-        """Inicializar con tamaño de ventana."""
-        self.buffers: Dict[int, deque] = defaultdict(lambda: deque(maxlen=window))
-
-    def update(self, track_id: int, pos: np.ndarray) -> np.ndarray:
-        """
-        Actualizar posición e retornar posición suavizada.
-        
-        Args:
-            track_id: ID del jugador
-            pos: Vector de posición [x, y]
-            
-        Returns:
-            Posición suavizada
-        """
-        self.buffers[track_id].append(pos)
-        return np.mean(self.buffers[track_id], axis=0)
+# Eliminado: PositionSmoother no es necesario sin tracking de IDs persistentes
 
 
 # ===================== BALL TRACKER =====================
@@ -644,49 +705,92 @@ class TacticalBoard:
 
 class SimpleFieldMapper:
     """
-    Mapeo simple de coordenadas de cámara a coordenadas del tablero
-    usando el rectángulo calibrado del campo.
+    Mapeo de coordenadas de cámara a tablero usando 6 puntos calibrados.
+    
+    Los 6 puntos definen el polígono exacto del campo:
+    - Índice 0: TL (Top-Left)
+    - Índice 1: CT (Center-Top)
+    - Índice 2: TR (Top-Right)
+    - Índice 3: BR (Bottom-Right)
+    - Índice 4: CB (Center-Bottom)
+    - Índice 5: BL (Bottom-Left)
     """
     
     def __init__(self, field_rect: np.ndarray, board_width: int, board_height: int):
         """
-        Inicializar mapeador.
+        Inicializar mapeador con 6 puntos calibrados.
         
         Args:
-            field_rect: Array con 4 puntos del rectángulo calibrado
+            field_rect: Array de 6 puntos: [TL, CT, TR, BR, CB, BL]
             board_width: Ancho del tablero
             board_height: Alto del tablero
         """
-        # Crear matriz de perspectiva simple
-        src_pts = field_rect.astype(np.float32)
+        if len(field_rect) < 6:
+            logger.warning(f"Se esperaban 6 puntos, se recibieron {len(field_rect)}. Usando 4 esquinas.")
+            # Fallback: si faltan puntos, usar solo esquinas
+            corners = np.array([
+                field_rect[0],  # TL
+                field_rect[2] if len(field_rect) > 2 else [field_rect[1][0] * 2 - field_rect[0][0], field_rect[0][1]],  # TR
+                field_rect[3] if len(field_rect) > 3 else [field_rect[2][0], field_rect[1][1] * 2 - field_rect[0][1]],  # BR
+                field_rect[5] if len(field_rect) > 5 else [field_rect[0][0], field_rect[3][1]],  # BL
+            ], dtype=np.float32)
+        else:
+            # Usar los 4 puntos de esquina en el orden correcto: TL, TR, BR, BL
+            corners = np.array([
+                field_rect[0],  # TL (index 0)
+                field_rect[2],  # TR (index 2)
+                field_rect[3],  # BR (index 3)
+                field_rect[5],  # BL (index 5)
+            ], dtype=np.float32)
+        
+        # Los puntos del medio se usan para refinar la transformación
+        self.field_rect = field_rect.astype(np.float32)
+        self.ct = field_rect[1] if len(field_rect) > 1 else None  # Center-Top
+        self.cb = field_rect[4] if len(field_rect) > 4 else None  # Center-Bottom
+        
+        # Destino: rectángulo completo del tablero
         dst_pts = np.array([
-            [0, 0],
-            [board_width, 0],
-            [board_width, board_height],
-            [0, board_height]
+            [0, 0],                    # TL
+            [board_width, 0],          # TR
+            [board_width, board_height],  # BR
+            [0, board_height]          # BL
         ], dtype=np.float32)
         
-        self.M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+        # Matriz de transformación perspectiva usando 4 esquinas
+        self.M = cv2.getPerspectiveTransform(corners, dst_pts)
         self.board_width = board_width
         self.board_height = board_height
+        
+        logger.info(f"Mapeador de campo inicializado con {len(field_rect)} puntos")
     
     def transform(self, pt: np.ndarray) -> np.ndarray:
         """
         Transformar punto de espacio de cámara a espacio de tablero.
+        Usa la matriz de perspectiva calculada con los 4 puntos de esquina.
         
         Args:
             pt: Punto [x, y]
             
         Returns:
-            Punto transformado [x, y]
+            Punto transformado [x, y] en coordenadas del tablero
         """
-        if pt[0] < 0 or pt[1] < 0:
-            return pt
+        if len(pt) < 2 or pt[0] < 0 or pt[1] < 0:
+            logger.debug(f"Punto inválido: {pt}")
+            return np.array([0.0, 0.0])
         
-        pt_2d = pt.reshape(1, 1, 2).astype(np.float32)
-        transformed = cv2.perspectiveTransform(pt_2d, self.M)[0][0]
-        
-        return transformed
+        try:
+            pt_2d = pt.reshape(1, 1, 2).astype(np.float32)
+            transformed = cv2.perspectiveTransform(pt_2d, self.M)[0][0]
+            
+            # Validar que el punto transformado esté dentro de los límites del tablero
+            if transformed[0] < 0 or transformed[0] > self.board_width or \
+               transformed[1] < 0 or transformed[1] > self.board_height:
+                logger.debug(f"Punto transformado fuera de tablero: {transformed}")
+            
+            return transformed
+        except Exception as e:
+            logger.error(f"Error en transformación: {e}")
+            return np.array([0.0, 0.0])
 
 
 # ===================== HELPER FUNCTIONS =====================
@@ -720,26 +824,33 @@ def read_first_frame(cap: cv2.VideoCapture, config: Config) -> Optional[np.ndarr
     return None
 
 
-def setup_detectors(config: Config) -> Tuple[Optional[YOLO], Optional[sv.ByteTrack]]:
-    """Inicializar modelo YOLO y tracker ByteTrack."""
+def setup_detectors(config: Config) -> Optional['YOLO']:
+    """Inicializar modelo YOLO para detección en tiempo real."""
+    # Cargar imports pesados solo cuando se necesiten
+    logger.info("[SETUP] Cargando dependencias pesadas (ultralytics, sklearn)...")
     try:
+        logger.debug("[IMPORT] from ultralytics import YOLO")
+        from ultralytics import YOLO
+        logger.info("[OK] Dependencias importadas correctamente")
+    except ImportError as e:
+        logger.error(f"[ERROR] Fallo importando dependencias: {e}")
+        return None
+    
+    try:
+        logger.info(f"[YOLO] Cargando modelo '{config.model_name}'...")
         model = YOLO(config.model_name)
-        logger.info(f"Modelo YOLO '{config.model_name}' cargado exitosamente")
+        logger.info(f"[OK] Modelo YOLO cargado en memoria")
     except Exception as e:
-        logger.error(f"Error cargando modelo YOLO: {e}")
-        return None, None
+        logger.error(f"[ERROR] Fallo cargando modelo YOLO: {e}")
+        return None
     
-    tracker = sv.ByteTrack(track_activation_threshold=config.track_activation_threshold)
-    logger.info("ByteTrack tracker inicializado")
-    
-    return model, tracker
+    logger.info("[SETUP] Detector listo: YOLO")
+    return model
 
 
 def process_frame(frame: np.ndarray,
-                  model: YOLO,
-                  tracker: sv.ByteTrack,
+                  model,
                   classifier: TeamClassifier,
-                  smoother: PositionSmoother,
                   mapper: SimpleFieldMapper,
                   field_validator: FieldValidator,
                   board_drawer: TacticalBoard,
@@ -747,49 +858,87 @@ def process_frame(frame: np.ndarray,
                   config: Config,
                   fps: float) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Procesar un frame: detectar, rastrear, clasificar, validar y renderizar.
-    Incluye rastreo de balón.
+    Procesar un frame: detectar, clasificar, validar y renderizar en tiempo real.
+    Sin tracking de IDs persistentes.
     """
+    import supervision as sv
+    
+    logger.debug("[PROCESS] Iniciando procesamiento de frame...")
+    
     # Detección YOLO
+    logger.debug("[YOLO] Ejecutando detección YOLO...")
     results = model.predict(
         frame,
         classes=[config.player_class_id, config.ball_class_id],
         conf=config.yolo_conf_threshold,
-        verbose=False
+        verbose=False,
+        iou=0.5,
     )[0]
+    logger.debug(f"[YOLO] Detecciones encontradas: {len(results.boxes)}")
+    
     detections = sv.Detections.from_ultralytics(results)
+    logger.info(f"[DETECT] Total detecciones: {len(detections)}")
 
     player_dets = detections[detections.class_id == config.player_class_id]
     ball_dets = detections[detections.class_id == config.ball_class_id]
+    
+    logger.info(f"[DETECT] Jugadores brutos: {len(player_dets)} | Balón: {len(ball_dets)}")
+
+    # Filtrar jugadores por tamaño
+    if len(player_dets) > 0:
+        bbox_areas = (player_dets.xyxy[:, 2] - player_dets.xyxy[:, 0]) * \
+                     (player_dets.xyxy[:, 3] - player_dets.xyxy[:, 1])
+        min_area = 300  # Reducido para detectar más jugadores
+        size_mask = bbox_areas > min_area
+        
+        if np.sum(~size_mask) > 0:
+            logger.info(f"[FILTER] Detectadas {np.sum(~size_mask)} detecciones muy pequeñas (ruido)")
+        
+        player_dets = player_dets[size_mask]
 
     # Filtrar jugadores fuera del campo
+    filtered_count = 0
     if len(player_dets) > 0:
         feet_coords = player_dets.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
         valid_mask = field_validator.filter_detections(player_dets, feet_coords)
+        filtered_count = np.sum(~valid_mask)
         player_dets = player_dets[valid_mask]
-        logger.debug(f"Filtrados {np.sum(~valid_mask)} jugadores fuera del campo")
-
-    # ByteTrack para IDs persistentes
-    tracked = tracker.update_with_detections(player_dets)
+        logger.info(f"[FILTER] Jugadores fuera del campo: {filtered_count} | Válidos dentro: {len(player_dets)}")
 
     # Entrenar clasificador cuando haya suficientes jugadores
-    if not classifier.trained and len(tracked) >= config.min_players_for_train:
-        classifier.train_teams(frame, tracked, config)
+    if not classifier.trained and len(player_dets) >= config.min_players_for_kmeans:
+        logger.info(f"[TRAIN] Suficientes jugadores ({len(player_dets)}) para entrenar clasificador...")
+        classifier.train_teams(frame, player_dets, config)
+    
+    if classifier.trained:
+        logger.debug("[TRAIN] Clasificador ya entrenado")
+    else:
+        logger.debug(f"[TRAIN] En espera: {len(player_dets)}/{config.min_players_for_kmeans} jugadores")
 
-    # Mapear posiciones de jugadores al tablero
+    # Mapear posiciones de jugadores al tablero (sin IDs persistentes)
     players_frame: List[Tuple[int, np.ndarray, int]] = []
-    if len(tracked) > 0:
-        feet = tracked.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+    if len(player_dets) > 0:
+        logger.debug("[MAP] Mapeando posiciones de jugadores al tablero...")
+        feet = player_dets.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+        
         for i, foot in enumerate(feet):
-            tid = int(tracked.tracker_id[i])
-            team_id = classifier.predict_team(frame, tracked.xyxy[i])
+            dummy_id = i + 1  # Solo ID temporal para frame actual
+            team_id = classifier.predict_team(frame, player_dets.xyxy[i])
             mapped = mapper.transform(foot)
-            smooth = smoother.update(tid, mapped)
-            players_frame.append((tid, smooth, team_id))
+            players_frame.append((dummy_id, mapped, team_id))
+        
+        # Estadísticas de equipos
+        team_counts = {}
+        for _, pos, team_id in players_frame:
+            team_key = f"Team {team_id}" if team_id >= 0 else "Árbitro"
+            team_counts[team_key] = team_counts.get(team_key, 0) + 1
+        
+        logger.info(f"[DETECT] {len(player_dets)} jugadores | Distribución: {team_counts}")
 
-    # Mapear y rastrear posición de la pelota
+    # Procesar balón
     current_ball_pos: Optional[np.ndarray] = None
     if len(ball_dets) > 0:
+        logger.debug("[BALL] Procesando detección de balón...")
         ball_center = ball_dets.get_anchors_coordinates(sv.Position.CENTER)[0]
         if field_validator.is_within_field(ball_center):
             current_ball_pos = mapper.transform(ball_center)
@@ -798,17 +947,20 @@ def process_frame(frame: np.ndarray,
     mapped_ball = ball_tracker.update(current_ball_pos)
 
     # Anotar frame de cámara
+    logger.debug("[ANNOTATE] Anotando frame de cámara...")
     annotated = frame.copy()
-    for i, bbox in enumerate(tracked.xyxy):
+    for i, bbox in enumerate(player_dets.xyxy):
         team_id = classifier.predict_team(frame, bbox)
         color = (128, 128, 128) if team_id < 0 else TacticalBoard.TEAM_COLORS[team_id % 2]
         x1, y1, x2, y2 = map(int, bbox)
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 3)
         
         team_text = "ÁRBITRO" if team_id < 0 else f"EQUIPO {team_id}"
-        cv2.putText(annotated, team_text, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        text_size = cv2.getTextSize(team_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+        cv2.rectangle(annotated, (x1, y1-30), (x1+text_size[0]+10, y1-5), color, -1)
+        cv2.putText(annotated, team_text, (x1+5, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     
-    # Dibujar balón rastreado
+    # Dibujar balón
     if len(ball_dets) > 0:
         ball_center = ball_dets.get_anchors_coordinates(sv.Position.CENTER)[0]
         bx, by = int(ball_center[0]), int(ball_center[1])
@@ -816,8 +968,10 @@ def process_frame(frame: np.ndarray,
         cv2.circle(annotated, (bx, by), 9, (255, 255, 255), 2)
 
     # Renderizar tablero táctico
+    logger.debug("[BOARD] Renderizando tablero táctico...")
     board_img = board_drawer.draw_state(players_frame, mapped_ball)
 
+    logger.debug("[PROCESS] Frame procesado exitosamente")
     return annotated, board_img
 
 
@@ -832,64 +986,92 @@ def main(cfg: Optional[Config] = None) -> None:
     print(" "*15 + "ANALIZADOR DE FUTSAL - CÁMARA LATERAL")
     print("="*70 + "\n")
     
+    logger.info("["*10 + "STARTUP" + "]"*10)
+    logger.info(f"Config: {cfg}")
+    
     url = input("Ingresa URL de YouTube: ").strip()
     if not url:
-        logger.error("URL vacía")
+        logger.error("URL vacía - abortando")
         return
+    
+    logger.info(f"URL ingresada: {url[:60]}...")
 
     start_time_str = input("Minuto de inicio (MM:SS, Enter para saltar): ").strip()
+    logger.info(f"Tiempo de inicio: {start_time_str if start_time_str else 'Desde el principio'}")
     
     # Abrir stream
-    logger.info("Abriendo stream de YouTube...")
+    logger.info("[STREAM] Abriendo stream de YouTube...")
     cap = open_youtube_stream(url, cfg)
     if cap is None or not cap.isOpened():
-        logger.error("Falló al abrir stream. Soluciones:")
+        logger.error("[ERROR] Falló al abrir stream")
         logger.error("  1. pip install --upgrade yt-dlp")
         logger.error("  2. Verifica que el video sea público")
         return
+    
+    logger.info("[OK] Stream abierto exitosamente")
 
     # Buscar minuto de inicio
     start_seconds = parse_start_time(start_time_str)
     if start_seconds > 0:
+        logger.info(f"[SEEK] Buscando frame en {start_seconds}s...")
         cap.set(cv2.CAP_PROP_POS_MSEC, start_seconds * 1000)
-        logger.info(f"Buscando a {start_seconds} segundos")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    logger.info(f"FPS del video: {fps}")
+    logger.info(f"[VIDEO] FPS: {fps}")
 
     # Leer primer frame
+    logger.info("[FRAME] Leyendo primer frame del stream...")
     first_frame = read_first_frame(cap, cfg)
     if first_frame is None:
+        logger.error("[ERROR] No se pudo leer el primer frame")
         cap.release()
         return
+    
+    frame_h, frame_w = first_frame.shape[:2]
+    logger.info(f"[FRAME] Dimensiones del frame: {frame_w}x{frame_h}")
 
     # Calibración con rectángulo
+    logger.info("[CALIBRATION] Abriendo interfaz de calibración...")
     calibrator = FieldCalibrator(first_frame.copy())
     field_rect = calibrator.calibrate()
     
-    if len(field_rect) != 4:
-        logger.error(f"Calibración falló: se necesitaban 4 puntos, se obtuvieron {len(field_rect)}")
+    if len(field_rect) < 4:
+        logger.error(f"[ERROR] Calibración falló: se necesitaban 4 puntos, se obtuvieron {len(field_rect)}")
         cap.release()
         return
+    
+    logger.info(f"[CALIBRATION] Calibración completada con {len(field_rect)} puntos")
 
     # Inicializar componentes
+    logger.info("[INIT] Inicializando validador y mapeador de campo...")
     try:
         field_validator = FieldValidator(field_rect)
+        logger.info("[OK] Validador de campo inicializado")
+        
         mapper = SimpleFieldMapper(field_rect, cfg.board_width, cfg.board_height)
+        logger.info("[OK] Mapeador de perspectiva inicializado")
     except Exception as e:
-        logger.error(f"Error en setup de validador: {e}")
+        logger.error(f"[ERROR] Error en setup: {e}")
         cap.release()
         return
 
     board_drawer = TacticalBoard(cfg.board_width, cfg.board_height)
+    logger.info("Tablero táctico inicializado")
+    
     classifier = TeamClassifier()
-    smoother = PositionSmoother(cfg.smoothing_window)
+    logger.info("Clasificador de equipos inicializado")
+    
     ball_tracker = BallTracker(max_distance=150)
+    logger.info("Rastreador de balón inicializado")
 
-    model, tracker = setup_detectors(cfg)
-    if model is None or tracker is None:
+    logger.info("Inicializando detector YOLO...")
+    model = setup_detectors(cfg)
+    if model is None:
+        logger.error("FALLÓ: No se pudo cargar el modelo YOLO")
         cap.release()
         return
+    
+    logger.info("Detector YOLO cargado exitosamente")
 
     # Crear ventanas
     cv2.namedWindow("Vista Cámara", cv2.WINDOW_NORMAL)
@@ -897,32 +1079,41 @@ def main(cfg: Optional[Config] = None) -> None:
 
     frame_idx = 0
     t_start = time.time()
-    logger.info("Análisis iniciado - Presiona Q para detener\n")
+    logger.info("="*70)
+    logger.info("ANÁLISIS EN TIEMPO REAL INICIADO - Presiona Q para detener")
+    logger.info("(Sin tracking de IDs persistentes - detección en vivo)")
+    logger.info("="*70 + "\n")
 
     try:
         # Bucle principal
         while True:
             ret, frame = cap.read()
             if not ret or frame is None:
-                logger.info("Fin del stream")
+                logger.info("[STREAM] Fin del stream alcanzado")
                 break
 
             frame_idx += 1
+            
+            if frame_idx % 10 == 0:
+                logger.info(f"[PROGRESS] Frame {frame_idx} - {time.time() - t_start:.1f}s transcurridos")
 
             # Procesar frame
             try:
+                logger.debug(f"[FRAME {frame_idx}] Iniciando procesamiento...")
                 annotated, board_img = process_frame(
-                    frame, model, tracker, classifier, smoother, mapper,
+                    frame, model, classifier, mapper,
                     field_validator, board_drawer, ball_tracker, cfg, fps
                 )
+                logger.debug(f"[FRAME {frame_idx}] Procesamiento completado")
             except Exception as e:
-                logger.error(f"Error procesando frame {frame_idx}: {e}")
+                logger.error(f"[ERROR] Frame {frame_idx}: {e}")
                 continue
 
             # Overlay de contador
             elapsed = time.time() - t_start
-            cv2.putText(annotated, f"Frame {frame_idx} | {elapsed:.0f}s",
-                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            status_text = f"Frame {frame_idx} | {elapsed:.1f}s"
+            cv2.putText(annotated, status_text,
+                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
             # Mostrar
             cv2.imshow("Vista Cámara", annotated)
@@ -930,15 +1121,18 @@ def main(cfg: Optional[Config] = None) -> None:
 
             # Verificar salida
             if cv2.waitKey(1) & 0xFF == ord("q"):
-                logger.info("Análisis detenido por usuario")
+                logger.info("[USER] Análisis detenido por usuario")
                 break
 
     finally:
         cap.release()
         cv2.destroyAllWindows()
-
-    logger.info(f"\nAnálisis completado - {frame_idx} frames procesados")
-    logger.info("="*70)
+        logger.info("="*70)
+        logger.info(f"ANÁLISIS COMPLETADO")
+        logger.info(f"  - Frames procesados: {frame_idx}")
+        logger.info(f"  - Tiempo total: {time.time() - t_start:.1f}s")
+        logger.info(f"  - FPS promedio: {frame_idx / (time.time() - t_start):.1f}")
+        logger.info("="*70)
 
 
 if __name__ == "__main__":
