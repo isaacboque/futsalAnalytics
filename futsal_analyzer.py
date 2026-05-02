@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 class Config:
     """Configuración centralizada del sistema de análisis."""
     model_name: str = "yolo11n.pt"
-    board_width: int = 1000
-    board_height: int = 500
+    board_width: int = 700
+    board_height: int = 350
     
     player_class_id: int = 0
     ball_class_id: int = 32
@@ -69,7 +69,7 @@ config = Config()
 def open_youtube_stream(url: str, config: Config) -> Optional[cv2.VideoCapture]:
     """
     Abre un video de YouTube como OpenCV VideoCapture.
-    Intenta obtener la mejor calidad disponible.
+    Intenta obtener la mejor calidad disponible, comenzando con 1080p y bajando.
     
     Args:
         url: URL del video de YouTube
@@ -78,7 +78,8 @@ def open_youtube_stream(url: str, config: Config) -> Optional[cv2.VideoCapture]:
     Returns:
         cv2.VideoCapture si es exitoso, None en caso contrario
     """
-    formats = ["best", "best[height<=1080]", "best[height<=720]", "best[height<=480]", "best[height<=360]"]
+    # Intenta resolutions en orden descendente: 1080, 720, 480, 360
+    formats = ["best[height<=1080]", "best[height<=720]", "best[height<=480]", "best[height<=360]", "best"]
     
     for fmt in formats:
         try:
@@ -954,11 +955,6 @@ def process_frame(frame: np.ndarray,
         color = (128, 128, 128) if team_id < 0 else TacticalBoard.TEAM_COLORS[team_id % 2]
         x1, y1, x2, y2 = map(int, bbox)
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 3)
-        
-        team_text = "ÁRBITRO" if team_id < 0 else f"EQUIPO {team_id}"
-        text_size = cv2.getTextSize(team_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-        cv2.rectangle(annotated, (x1, y1-30), (x1+text_size[0]+10, y1-5), color, -1)
-        cv2.putText(annotated, team_text, (x1+5, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     
     # Dibujar balón
     if len(ball_dets) > 0:
