@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 
 from futsal_analytics.calibration import (
-    FieldCalibrator,
     _POINT_LABELS,
+    FieldCalibrator,
     load_calibration,
     save_calibration,
 )

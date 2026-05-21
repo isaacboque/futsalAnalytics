@@ -5,7 +5,6 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
-
 # Real futsal pitch dimensions (FIFA international standard, in metres).
 PITCH_WIDTH_M = 40.0
 PITCH_HEIGHT_M = 20.0
@@ -37,9 +36,6 @@ class TacticalBoard:
         self.height = height
         self.m_per_px_x = PITCH_WIDTH_M / width
         self.m_per_px_y = PITCH_HEIGHT_M / height
-        # Average scale (used for KPI distance conversion). Isotropic only when
-        # board aspect ratio matches the 2:1 pitch ratio.
-        self.m_per_px = (self.m_per_px_x + self.m_per_px_y) / 2.0
 
     @property
     def px_per_m_x(self) -> float:

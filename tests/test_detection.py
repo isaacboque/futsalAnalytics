@@ -6,7 +6,6 @@ import pytest
 from futsal_analytics.board import TacticalBoard
 from futsal_analytics.detection import BallTracker, TeamClassifier, resolve_device
 
-
 # ---------------------------------------------------------------------------
 # BallTracker
 # ---------------------------------------------------------------------------

@@ -7,7 +7,6 @@ import pytest
 
 from futsal_analytics.kpis import KPITracker, PositionLogger
 
-
 # ---------------------------------------------------------------------------
 # KPITracker
 # ---------------------------------------------------------------------------
@@ -117,6 +116,30 @@ class TestKPITrackerCSV:
         content = out.read_text()
         assert "track_id" in content
         assert "distance_m" in content
+
+    def test_save_csv_is_atomic_no_tmp_leftover(self, tmp_path):
+        kt = KPITracker(fps=25.0, board_width_px=700, board_height_px=350)
+        kt.update(0, [(1, np.array([100.0, 100.0]), 0)], None)
+        out = tmp_path / "kpis.csv"
+        kt.save_csv(out)
+        # The atomic write should not leave a .tmp sibling behind.
+        assert not (tmp_path / "kpis.tmp.csv").exists()
+        assert out.exists()
+
+    def test_save_csv_overwrites_in_place(self, tmp_path):
+        kt = KPITracker(fps=25.0, board_width_px=700, board_height_px=350)
+        out = tmp_path / "kpis.csv"
+        # Snapshot 1 — one player
+        kt.update(0, [(1, np.array([100.0, 100.0]), 0)], None)
+        kt.save_csv(out, quiet=True)
+        first_size = out.stat().st_size
+        # Snapshot 2 — two players, so a larger file
+        kt.update(1, [
+            (1, np.array([110.0, 100.0]), 0),
+            (2, np.array([200.0, 200.0]), 1),
+        ], None)
+        kt.save_csv(out, quiet=True)
+        assert out.stat().st_size > first_size
 
     def test_summary_returns_string(self):
         kt = KPITracker(fps=25.0, board_width_px=700, board_height_px=350)

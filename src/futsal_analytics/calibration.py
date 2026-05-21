@@ -119,15 +119,25 @@ class FieldCalibrator:
 
         self.dragging: bool = False
         self.active_point: Optional[int] = None
+        self.hover_point: Optional[int] = None
         self._WIN = "Field Calibration"
 
     # ------------------------------------------------------------------
     # Drawing
     # ------------------------------------------------------------------
 
+    # Visual constants (BGR)
+    _OVERLAY_BLUE = (220, 130, 50)       # translucent fill for inside-polygon area
+    _LINE_WHITE = (240, 240, 240)        # polygon edges
+    _HALFWAY_CYAN = (220, 220, 60)       # CT–CB halfway line
+    _HANDLE_YELLOW = (0, 230, 255)       # idle handle
+    _HANDLE_ORANGE = (0, 145, 255)       # hovered or dragged handle
+    _HANDLE_RING = (255, 255, 255)       # handle outline
+    _INSTR_BG = (24, 24, 28)             # instruction bar background
+
     def draw_frame(self) -> np.ndarray:
         """Return the current canvas with polygon, control handles and labels."""
-        canvas = np.full((self.canvas_h, self.canvas_w, 3), (80, 80, 80), dtype=np.uint8)
+        canvas = np.full((self.canvas_h, self.canvas_w, 3), (32, 32, 36), dtype=np.uint8)
         canvas[
             self.offset_y : self.offset_y + self.h,
             self.offset_x : self.offset_x + self.w,
@@ -135,7 +145,7 @@ class FieldCalibrator:
 
         pts = (self.points + np.array([self.offset_x, self.offset_y])).astype(np.int32)
 
-        # Darken area outside the polygon
+        # Translucent blue polygon overlay + outer dimming
         overlay = canvas.copy()
         cv2.rectangle(
             overlay,
@@ -144,8 +154,8 @@ class FieldCalibrator:
             (0, 0, 0),
             -1,
         )
-        cv2.fillPoly(overlay, [pts], (50, 100, 50))
-        cv2.addWeighted(overlay, 0.4, canvas, 0.6, 0, canvas)
+        cv2.fillPoly(overlay, [pts], self._OVERLAY_BLUE)
+        cv2.addWeighted(overlay, 0.35, canvas, 0.65, 0, canvas)
 
         cv2.rectangle(
             canvas,
@@ -155,29 +165,46 @@ class FieldCalibrator:
             2,
         )
 
+        # White polygon edges
         for i in range(len(pts)):
-            cv2.line(canvas, tuple(pts[i]), tuple(pts[(i + 1) % len(pts)]), (0, 255, 0), 3)
+            cv2.line(
+                canvas,
+                tuple(pts[i]),
+                tuple(pts[(i + 1) % len(pts)]),
+                self._LINE_WHITE,
+                2,
+                cv2.LINE_AA,
+            )
 
         # Halfway line: CT (1) → CB (4)
         if len(pts) >= 5:
-            cv2.line(canvas, tuple(pts[1]), tuple(pts[4]), (0, 200, 200), 2, cv2.LINE_AA)
+            cv2.line(canvas, tuple(pts[1]), tuple(pts[4]), self._HALFWAY_CYAN, 2, cv2.LINE_AA)
 
+        # Handles — orange on hover or drag, yellow otherwise
         handle_size = 12
         for idx, (pt, label) in enumerate(zip(pts, _POINT_LABELS)):
             x, y = int(pt[0]), int(pt[1])
-            color = (0, 165, 255) if (self.active_point == idx and self.dragging) else (0, 255, 255)
-            cv2.circle(canvas, (x, y), handle_size, color, -1)
-            cv2.circle(canvas, (x, y), handle_size, (255, 255, 255), 3)
-            cv2.putText(canvas, str(idx), (x - 5, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-            cv2.putText(canvas, label, (x - 15, y - handle_size - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            is_active = idx == self.active_point and self.dragging
+            is_hover = idx == self.hover_point and not self.dragging
+            color = self._HANDLE_ORANGE if (is_active or is_hover) else self._HANDLE_YELLOW
+            radius = handle_size + 2 if (is_active or is_hover) else handle_size
+            cv2.circle(canvas, (x, y), radius, color, -1, cv2.LINE_AA)
+            cv2.circle(canvas, (x, y), radius, self._HANDLE_RING, 2, cv2.LINE_AA)
+            cv2.putText(canvas, str(idx), (x - 5, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2, cv2.LINE_AA)
+            cv2.putText(canvas, label, (x - 15, y - radius - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
+        # Bottom instruction bar
+        bar_h = 36
+        bar_top = self.canvas_h - bar_h
+        cv2.rectangle(canvas, (0, bar_top), (self.canvas_w, self.canvas_h), self._INSTR_BG, -1)
+        cv2.line(canvas, (0, bar_top), (self.canvas_w, bar_top), (90, 90, 100), 1)
         cv2.putText(
             canvas,
             "CLICK + DRAG points | SPACE: confirm | R: reset | ESC: cancel",
-            (self.offset_x + 10, self.offset_y + 25),
+            (12, bar_top + 23),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
-            (255, 255, 255),
+            (235, 235, 235),
             1,
             cv2.LINE_AA,
         )
@@ -187,12 +214,16 @@ class FieldCalibrator:
     # Point manipulation
     # ------------------------------------------------------------------
 
-    def get_point_index(self, x: int, y: int, threshold: int = 25) -> Optional[int]:
+    def get_point_index(self, x: int, y: int, threshold: int = 20) -> Optional[int]:
         """Return the index of the nearest control point within *threshold* pixels."""
+        best_idx: Optional[int] = None
+        best_dist = float(threshold)
         for idx, pt in enumerate(self.points):
-            if np.sqrt((x - pt[0]) ** 2 + (y - pt[1]) ** 2) < threshold:
-                return idx
-        return None
+            d = float(np.hypot(x - pt[0], y - pt[1]))
+            if d < best_dist:
+                best_dist = d
+                best_idx = idx
+        return best_idx
 
     def update_point(self, point_idx: int, x: int, y: int) -> None:
         """Move control point *point_idx* to canvas-relative coordinates (x, y)."""
@@ -257,15 +288,19 @@ class FieldCalibrator:
                 if idx is not None:
                     self.dragging = True
                     self.active_point = idx
+                    self.hover_point = idx
                     print(f"  -> Point {_POINT_LABELS[idx]} ({idx}) active")
             elif event == cv2.EVENT_MOUSEMOVE:
                 if self.dragging and self.active_point is not None:
                     self.update_point(self.active_point, frame_x, frame_y)
+                else:
+                    self.hover_point = self.get_point_index(frame_x, frame_y)
             elif event == cv2.EVENT_LBUTTONUP:
                 if self.dragging and self.active_point is not None:
                     print(f"  [OK] Point {_POINT_LABELS[self.active_point]} ({self.active_point}) placed")
                 self.dragging = False
                 self.active_point = None
+                self.hover_point = self.get_point_index(frame_x, frame_y)
 
         cv2.setMouseCallback(self._WIN, _mouse)
         print("Window open. Drag the yellow handles to the pitch boundaries.\n")

@@ -8,7 +8,6 @@ metres uses the board's known real-world mapping (40 m × 20 m futsal pitch).
 
 import csv
 import logging
-from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -61,10 +60,13 @@ class KPITracker:
         possession_radius_m: float = 1.5,
     ) -> None:
         self.fps = fps if fps > 0 else 25.0
-        # Mean isotropic scale; assumes board aspect ratio ≈ 2:1 (40×20 m pitch)
+        # Per-axis pixel-to-metre scale. Each pixel displacement (dx, dy) is
+        # converted to metres component-wise (dx * m_per_px_x, dy * m_per_px_y)
+        # before computing Euclidean distance. Averaging the two scales — as
+        # the previous implementation did — biases distance estimates whenever
+        # the tactical board's aspect ratio doesn't match the 2:1 pitch ratio.
         self.m_per_px_x = PITCH_WIDTH_M / board_width_px
         self.m_per_px_y = PITCH_HEIGHT_M / board_height_px
-        self.m_per_px = (self.m_per_px_x + self.m_per_px_y) / 2.0
         self.sprint_threshold_ms = sprint_threshold_ms
         self.duel_radius_m = duel_radius_m
         self.possession_radius_m = possession_radius_m
@@ -180,19 +182,37 @@ class KPITracker:
             )
         return rows
 
-    def save_csv(self, path: Path) -> None:
-        """Write per-player KPIs to a CSV file."""
+    def save_csv(self, path: Path, *, quiet: bool = False) -> None:
+        """Write per-player KPIs to a CSV file.
+
+        Writes atomically (``.tmp`` then ``os.replace``) so a Streamlit viewer
+        reading mid-flush sees either the previous full file or the new full
+        file, never a half-written one. Safe to call from the main loop every
+        few frames for live dashboards.
+
+        Args:
+            path: Destination CSV path.
+            quiet: When True, suppress the "wrote N rows" info log. The main
+                   loop uses this for periodic incremental flushes to avoid
+                   filling logs with one INFO line per flush.
+        """
+        import os
+
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         rows = self.to_rows()
         if not rows:
-            logger.warning("No KPI rows to write to %s", path)
+            if not quiet:
+                logger.warning("No KPI rows to write to %s", path)
             return
-        with path.open("w", newline="", encoding="utf-8") as fp:
+        tmp = path.with_name(f"{path.stem}.tmp{path.suffix}")
+        with tmp.open("w", newline="", encoding="utf-8") as fp:
             writer = csv.DictWriter(fp, fieldnames=list(rows[0].keys()))
             writer.writeheader()
             writer.writerows(rows)
-        logger.info("[KPI] Wrote %d player rows to %s", len(rows), path)
+        os.replace(tmp, path)
+        if not quiet:
+            logger.info("[KPI] Wrote %d player rows to %s", len(rows), path)
 
     def summary(self) -> str:
         """Return a multi-line human-readable summary."""

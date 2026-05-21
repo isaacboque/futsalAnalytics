@@ -14,17 +14,32 @@ logger = logging.getLogger(__name__)
 
 def open_youtube_stream(url: str, config: Config) -> Optional[cv2.VideoCapture]:
     """
-    Open a YouTube video as an OpenCV VideoCapture.
+    Open a YouTube video — or a local file path — as an OpenCV VideoCapture.
 
-    Tries resolutions in descending order (1080p → 720p → 480p → 360p → best).
+    If *url* is a local file path that exists on disk, it is opened directly
+    by OpenCV. Otherwise it is resolved via yt-dlp, trying resolutions in
+    descending order (1080p → 720p → 480p → 360p → best).
 
     Args:
-        url: Public YouTube video or live-stream URL.
+        url: Public YouTube URL, live-stream URL, or local video file path.
         config: System configuration (uses ``yt_dlp_timeout``).
 
     Returns:
         An opened ``cv2.VideoCapture``, or ``None`` on failure.
     """
+    # Local-file fast path — no yt-dlp needed
+    from pathlib import Path
+
+    local_candidate = Path(url)
+    if local_candidate.exists() and local_candidate.is_file():
+        cap = cv2.VideoCapture(str(local_candidate))
+        if cap.isOpened():
+            logger.info("Opened local file: %s", local_candidate)
+            return cap
+        cap.release()
+        logger.error("OpenCV could not open local file: %s", local_candidate)
+        return None
+
     formats = [
         "best[height<=1080]",
         "best[height<=720]",
@@ -98,15 +113,25 @@ def read_first_frame(cap: cv2.VideoCapture, config: Config) -> Optional[cv2.typi
 
 def parse_start_time(time_str: str) -> int:
     """
-    Parse a ``MM:SS`` or ``SS`` time string into total seconds.
+    Parse a ``HH:MM:SS``, ``MM:SS`` or ``SS`` time string into total seconds.
 
     Returns 0 on invalid input (with a warning logged).
     """
+    if time_str is None:
+        return 0
     try:
-        parts = time_str.split(":")
-        if len(parts) == 2:
-            return int(parts[0]) * 60 + int(parts[1])
-        return int(parts[0])
-    except (ValueError, IndexError):
+        parts = [int(p) for p in time_str.strip().split(":")]
+    except ValueError:
         logger.warning("Invalid time format '%s' — starting from 0", time_str)
         return 0
+
+    if not parts:
+        return 0
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    logger.warning("Time '%s' has too many components — starting from 0", time_str)
+    return 0

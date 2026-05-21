@@ -7,7 +7,7 @@ calibration-only workflows start quickly without loading the full ML stack.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -171,7 +171,7 @@ def resolve_device(device: str = "auto") -> str:
 
         if torch.cuda.is_available():
             return "cuda"
-    except Exception:  # noqa: BLE001 — torch DLL/OSError on broken installs
+    except Exception:
         pass
     return "cpu"
 

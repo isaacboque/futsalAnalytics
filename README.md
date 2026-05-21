@@ -66,7 +66,9 @@ pip install -e ".[dev]"
 Dependencies (declared in `pyproject.toml`): `opencv-python`, `ultralytics`,
 `supervision`, `scikit-learn`, `yt-dlp`, `numpy`.
 
-The YOLO model (`yolo11n.pt`) is downloaded automatically on first run.
+The YOLO model (`yolo11n.pt`, ~5.6 MB) is downloaded automatically by
+`ultralytics` on first run and cached locally. Override the model with
+`Config(model_name="yolo11s.pt")` or similar for accuracy / speed trade-offs.
 
 ## Usage
 
@@ -119,21 +121,30 @@ futsal-analytics \
 | `--max-frames N` | Stop after N frames (0 = unlimited) | `0` |
 | `--retrain-every N` | Re-train team classifier every N frames | `0` (never) |
 | `--skip-when-behind SECONDS` | For live streams, skip ahead when processing lags | `0.0` (off) |
+| `--snapshot-every N` | Write annotated camera + tactical board JPEGs every N frames for web live previews (0 = disabled) | `0` |
+| `--snapshot-dir DIR` | Where to write live snapshots (defaults to the same parent as `--save-positions`) | inferred |
+| `--snapshot-width PX` | Downscale snapshots to this width before encoding (0 = native) | `960` |
 
-## Web viewer
+The CLI also accepts a **local video file path** as `--url` — local paths are
+opened directly by OpenCV without going through yt-dlp.
 
-A Streamlit dashboard loads the analyser's output files and shows interactive
-overview metrics, per-player KPI tables, heatmaps, a frame-by-frame
-tactical-board replay, and the recorded videos.
+## Web app
+
+A two-page Streamlit app:
+
+- **Analyse** — paste a YouTube URL, pick a clean frame, place 6 calibration
+  points in the browser, and start the analyser. The CLI runs as a subprocess
+  with `--no-gui` and stdout streams into a live log panel.
+- **Viewer** — interactive Overview, Tracks, Heatmaps, Replay and Video tabs
+  for a single run.
 
 ```bash
 pip install -e ".[viewer]"
 streamlit run web/app.py
 ```
 
-In the sidebar, set **Output directory** to the folder containing
-`positions.jsonl`, `kpis.csv`, and optional `board.mp4` / `camera.mp4`.
-See [`web/README.md`](web/README.md) for the full workflow.
+The sidebar nav switches between Home / Analyse / Viewer. See
+[`web/README.md`](web/README.md) for the full workflow and file layout.
 
 ## Output formats
 
@@ -200,12 +211,13 @@ futsalAnalytics/
 ├── pyproject.toml
 ├── README.md
 ├── .github/workflows/tests.yml
+├── .streamlit/config.toml
 ├── src/futsal_analytics/
 │   ├── __init__.py
-│   ├── __main__.py        argparse CLI + main pipeline
+│   ├── __main__.py        argparse CLI + main pipeline + run-lock + snapshots
 │   ├── config.py          Config dataclass
-│   ├── stream.py          YouTube stream + frame reading
-│   ├── calibration.py     FieldCalibrator + load/save helpers
+│   ├── stream.py          stream / local-file opening + HH:MM:SS parsing
+│   ├── calibration.py     FieldCalibrator (OpenCV UI) + load/save helpers
 │   ├── field.py           FieldValidator + SimpleFieldMapper (6-pt homography)
 │   ├── detection.py       TeamClassifier, BallTracker, ByteTrack, process_frame
 │   ├── board.py           TacticalBoard (FIFA-spec futsal markings)
@@ -217,8 +229,18 @@ futsalAnalytics/
 │   ├── test_calibration.py
 │   ├── test_cli.py
 │   ├── test_detection.py
-│   ├── test_field.py
-│   └── test_kpis.py
+│   ├── test_field.py            (incl. 6-point homography numerics)
+│   ├── test_kpis.py
+│   ├── test_runtime_helpers.py  (snapshot writer + lock file)
+│   ├── test_stream.py           (parse_start_time, local-file fast path)
+│   └── test_web_shared.py       (robust JSONL / CSV loaders)
+├── web/
+│   ├── app.py             landing page
+│   ├── _shared.py         CSS, theme, cached loaders, sidebar helpers
+│   ├── README.md
+│   └── pages/
+│       ├── 1_Analyse.py   URL/local upload → in-browser calibration → run
+│       └── 2_Viewer.py    Overview / Tracks / Heatmaps / Replay / Video
 └── docs/
     ├── CALIBRATION.md
     ├── CHANGELOG.md

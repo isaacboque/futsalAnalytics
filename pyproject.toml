@@ -13,7 +13,9 @@ authors = [{ name = "Isaac Boque", email = "isboque19@gmail.com" }]
 dependencies = [
     "opencv-python",
     "ultralytics",
-    "supervision",
+    # supervision 0.30 removes the top-level sv.ByteTrack alias used by
+    # detection.make_tracker(); pin until we migrate.
+    "supervision>=0.25,<0.30",
     "scikit-learn",
     "yt-dlp",
     "numpy",
@@ -21,7 +23,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
-viewer = ["streamlit>=1.30", "plotly>=5.18", "pandas>=2.0"]
+viewer = [
+    "streamlit>=1.32",
+    "plotly>=5.18",
+    "pandas>=2.0",
+    "streamlit-image-coordinates>=0.1.6",
+]
 
 [project.scripts]
 futsal-analytics = "futsal_analytics.__main__:main"
@@ -29,3 +36,32 @@ futsal-calibrate  = "futsal_analytics.calibration:run_standalone"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+extend-exclude = ["yolo11n.pt", "out", "out_smoke"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP", "RUF"]
+ignore = [
+    "E501",   # line too long — formatter handles this where it matters
+    "B008",   # function call in arg defaults — common in argparse + dataclasses
+    "RUF001", # ambiguous unicode — we use × / → intentionally in UI text
+    "RUF002", # ditto in docstrings
+    "RUF003", # ditto in comments
+    "UP006",  # List[X] vs list[X] — typing module forms are fine
+    "UP007",  # Optional[X] vs X | None — Optional is more readable to many
+    "UP035",  # deprecated typing imports
+    "UP045",  # typing.Optional → X | None
+    "B905",   # zip(strict=…) — older Python compatibility
+    "RUF005", # [*a, b] is not always clearer than a + [b]
+    "E741",   # "l" as a loop variable is sometimes the obvious choice
+    "RUF046", # cv2 returns floats; int(...) is intentional and explicit
+    "RUF022", # __all__ ordering is informational here
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]    # tests legitimately do sys.path tweaks
+"web/pages/*" = ["E402"]
+"web/_shared.py" = ["E402"]

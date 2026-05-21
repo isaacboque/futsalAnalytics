@@ -1,6 +1,7 @@
 """Field geometry: polygon validation and 6-point homography mapping."""
 
 import logging
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -122,11 +123,17 @@ class SimpleFieldMapper:
 
         logger.info("SimpleFieldMapper: %s, %d input points", self._mode, len(field_rect))
 
-    def transform(self, pt: np.ndarray) -> np.ndarray:
-        """Map a single camera-space point to board coordinates."""
+    def transform(self, pt: np.ndarray) -> Optional[np.ndarray]:
+        """Map a single camera-space point to board coordinates.
+
+        Returns ``None`` when the input is malformed or the perspective
+        transform fails. Callers must handle ``None`` (e.g. skip the point)
+        rather than silently mapping errors to ``(0, 0)`` which would create
+        false hot spots in the top-left corner of every heatmap.
+        """
         if len(pt) < 2 or pt[0] < 0 or pt[1] < 0:
             logger.debug("Invalid point: %s", pt)
-            return np.array([0.0, 0.0])
+            return None
         try:
             result = cv2.perspectiveTransform(pt.reshape(1, 1, 2).astype(np.float32), self.M)[0][0]
             if result[0] < 0 or result[0] > self.board_width or result[1] < 0 or result[1] > self.board_height:
@@ -134,7 +141,7 @@ class SimpleFieldMapper:
             return result
         except Exception as exc:
             logger.error("Transform error: %s", exc)
-            return np.array([0.0, 0.0])
+            return None
 
     def transform_batch(self, pts: np.ndarray) -> np.ndarray:
         """Map an array of shape (N, 2) of camera points to board coordinates."""

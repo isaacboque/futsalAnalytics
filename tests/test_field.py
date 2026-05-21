@@ -5,7 +5,6 @@ import pytest
 
 from futsal_analytics.field import FieldValidator, SimpleFieldMapper
 
-
 # ---------------------------------------------------------------------------
 # FieldValidator
 # ---------------------------------------------------------------------------
@@ -116,10 +115,10 @@ class TestSimpleFieldMapperSixPoint:
         assert result[0] == pytest.approx(350, abs=5.0)
         assert result[1] == pytest.approx(350, abs=5.0)
 
-    def test_invalid_point_returns_zeros(self, default_polygon):
+    def test_invalid_point_returns_none(self, default_polygon):
         mapper = SimpleFieldMapper(default_polygon, 700, 350)
         result = mapper.transform(np.array([-1.0, -1.0]))
-        np.testing.assert_array_equal(result, [0.0, 0.0])
+        assert result is None
 
     def test_transform_batch(self, default_polygon):
         mapper = SimpleFieldMapper(default_polygon, 700, 350)
@@ -139,3 +138,39 @@ class TestSimpleFieldMapperFallback:
     def test_raises_with_three_points(self):
         with pytest.raises(ValueError):
             SimpleFieldMapper(np.array([[0, 0], [1, 0], [0, 1]], dtype=np.float32), 700, 350)
+
+
+class TestSixPointHomographyAccuracy:
+    """Pin the homography to its expected destination coordinates."""
+
+    def test_each_calibration_point_maps_to_its_board_corner(self, default_polygon):
+        # default_polygon is a perfect trapezoid-on-rectangle (synthetic), so the
+        # 6-point fit should be essentially exact at every input.
+        mapper = SimpleFieldMapper(default_polygon, 700, 350)
+        expected = np.array(
+            [
+                [0, 0],       # TL
+                [350, 0],     # CT
+                [700, 0],     # TR
+                [700, 350],   # BR
+                [350, 350],   # CB
+                [0, 350],     # BL
+            ],
+            dtype=np.float32,
+        )
+        for src, exp in zip(default_polygon, expected):
+            out = mapper.transform(src)
+            assert out is not None
+            assert out[0] == pytest.approx(exp[0], abs=2.0), f"x off for {src}"
+            assert out[1] == pytest.approx(exp[1], abs=2.0), f"y off for {src}"
+
+    def test_centre_of_pitch_maps_to_board_centre(self, default_polygon):
+        # Midpoint between TL and BR (≈ centre of the calibration polygon) should
+        # map close to (W/2, H/2). Not exact because the trapezoid isn't a
+        # perfect rectangle, but should be in the central region.
+        mapper = SimpleFieldMapper(default_polygon, 700, 350)
+        centre_in = (default_polygon[0] + default_polygon[3]) / 2.0
+        out = mapper.transform(centre_in)
+        assert out is not None
+        assert 200 < out[0] < 500
+        assert 100 < out[1] < 250
