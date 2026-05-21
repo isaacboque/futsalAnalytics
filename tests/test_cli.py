@@ -103,3 +103,27 @@ def test_frame_stride_default_and_override():
     assert args.frame_stride == 1
     args = parser.parse_args(["--frame-stride", "3"])
     assert args.frame_stride == 3
+
+
+def test_tracker_tuning_defaults():
+    parser = build_parser()
+    args = parser.parse_args([])
+    # Futsal-friendly defaults — verify they actually got applied.
+    assert args.tracker_buffer == 90
+    assert args.tracker_conf == 0.35
+    assert args.tracker_iou == 0.7
+    assert args.tracker_minframes == 2
+
+
+def test_tracker_tuning_overrides():
+    parser = build_parser()
+    args = parser.parse_args([
+        "--tracker-buffer", "150",
+        "--tracker-conf", "0.45",
+        "--tracker-iou", "0.6",
+        "--tracker-minframes", "3",
+    ])
+    assert args.tracker_buffer == 150
+    assert args.tracker_conf == 0.45
+    assert args.tracker_iou == 0.6
+    assert args.tracker_minframes == 3

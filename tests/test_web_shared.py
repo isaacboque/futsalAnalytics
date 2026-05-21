@@ -18,6 +18,7 @@ from _shared import (
     load_roster,
     player_label,
     save_roster,
+    suggest_track_merges,
 )
 
 
@@ -193,3 +194,74 @@ class TestRoster:
         agg = apply_roster_to_kpis(kpis, None)
         assert len(agg) == 1
         assert agg.iloc[0]["player_id"] == "_unassigned"
+
+
+class TestSuggestTrackMerges:
+    def _positions_with(self, tracks: list[dict]) -> list[dict]:
+        """Build a synthetic positions JSONL list.
+
+        Each ``tracks`` entry: {id, team, frames: [(frame, t, x, y), ...]}.
+        Frames are interleaved in time order so the function sees them
+        the same way it would from a real run.
+        """
+        rows = []
+        # Flatten + sort by frame
+        for trk in tracks:
+            for f, t, x, y in trk["frames"]:
+                rows.append((f, t, {"id": trk["id"], "team": trk["team"],
+                                    "x": x, "y": y}))
+        rows.sort(key=lambda r: r[0])
+        # Group by frame
+        out: dict[int, dict] = {}
+        for f, t, p in rows:
+            out.setdefault(f, {"frame": f, "t": t, "players": [], "ball": None})
+            out[f]["players"].append(p)
+        return [out[k] for k in sorted(out.keys())]
+
+    def test_finds_obvious_merge(self):
+        # Track 1: frames 0-30 ending at (300, 175) at t=1.0
+        # Track 2: frames 35-60 starting at (310, 180) at t=1.17 — gap 0.17s, ~6px
+        positions = self._positions_with([
+            {"id": 1, "team": 0, "frames":
+                [(f, f / 30.0, 300.0, 175.0) for f in range(0, 31)]},
+            {"id": 2, "team": 0, "frames":
+                [(f, f / 30.0, 310.0, 180.0) for f in range(35, 61)]},
+        ])
+        sug = suggest_track_merges(positions, min_track_frames=5)
+        assert len(sug) >= 1
+        # The 1->2 pair should be the top candidate
+        assert sug[0][0] == 1 and sug[0][1] == 2
+
+    def test_rejects_different_teams(self):
+        positions = self._positions_with([
+            {"id": 1, "team": 0, "frames":
+                [(f, f / 30.0, 300.0, 175.0) for f in range(0, 31)]},
+            {"id": 2, "team": 1, "frames":
+                [(f, f / 30.0, 310.0, 180.0) for f in range(35, 61)]},
+        ])
+        sug = suggest_track_merges(positions, min_track_frames=5)
+        assert sug == []
+
+    def test_rejects_temporal_overlap(self):
+        # Both tracks alive simultaneously — they are obviously two players
+        positions = self._positions_with([
+            {"id": 1, "team": 0, "frames":
+                [(f, f / 30.0, 100.0, 100.0) for f in range(0, 30)]},
+            {"id": 2, "team": 0, "frames":
+                [(f, f / 30.0, 200.0, 200.0) for f in range(15, 45)]},
+        ])
+        sug = suggest_track_merges(positions, min_track_frames=5)
+        assert sug == []
+
+    def test_rejects_too_far_apart(self):
+        # Tracks within the time window but the player would have had to
+        # teleport across the pitch
+        positions = self._positions_with([
+            {"id": 1, "team": 0, "frames":
+                [(f, f / 30.0, 0.0, 0.0) for f in range(0, 31)]},
+            {"id": 2, "team": 0, "frames":
+                [(f, f / 30.0, 700.0, 350.0) for f in range(35, 61)]},
+        ])
+        sug = suggest_track_merges(positions, min_track_frames=5,
+                                   max_distance_m=5.0)
+        assert sug == []

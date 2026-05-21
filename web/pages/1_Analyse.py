@@ -555,6 +555,41 @@ with col_opts2:
         ),
     )
 
+with st.expander("Tracking quality (advanced)"):
+    st.caption(
+        "ByteTrack uses motion + IoU only \u2014 no appearance features. The "
+        "single biggest lever is **lost-track buffer**: how long to remember "
+        "a track after detection drops. Higher = fewer ID switches across "
+        "occlusions, but stale tracks may linger."
+    )
+    col_t1, col_t2 = st.columns(2)
+    with col_t1:
+        tracker_buffer = st.slider(
+            "Lost-track buffer (frames)",
+            min_value=15, max_value=300, value=90, step=15,
+            help="Default 90 \u2248 3 s @ 30 fps. Try 150 if players keep "
+                 "losing their ID during occlusions.",
+        )
+        tracker_minframes = st.slider(
+            "Min consecutive frames before activation",
+            min_value=1, max_value=10, value=2, step=1,
+            help="Higher kills 1-frame flicker detections that would spawn "
+                 "ghost tracks. 2-3 is a good range for futsal.",
+        )
+    with col_t2:
+        tracker_conf = st.slider(
+            "Track activation confidence",
+            min_value=0.10, max_value=0.70, value=0.35, step=0.05,
+            help="Detection confidence required to start a track. Higher "
+                 "filters more false positives.",
+        )
+        tracker_iou = st.slider(
+            "Minimum matching IoU",
+            min_value=0.30, max_value=0.95, value=0.70, step=0.05,
+            help="Lower allows faster apparent motion between frames "
+                 "(broadcast pan / camera shake).",
+        )
+
 col_run, col_stop = st.columns([1, 1])
 
 proc: Optional[subprocess.Popen] = st.session_state.get("an_proc")
@@ -663,6 +698,10 @@ def _build_cmd() -> List[str]:
         "--snapshot-dir", str(out_dir),
         "--imgsz", str(int(imgsz)),
         "--frame-stride", str(int(frame_stride)),
+        "--tracker-buffer", str(int(tracker_buffer)),
+        "--tracker-conf", f"{float(tracker_conf):.2f}",
+        "--tracker-iou", f"{float(tracker_iou):.2f}",
+        "--tracker-minframes", str(int(tracker_minframes)),
     ]
     if rec_camera:
         cmd += ["--save-video", str(out_dir / "camera.mp4")]

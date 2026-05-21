@@ -292,6 +292,29 @@ def build_parser() -> argparse.ArgumentParser:
             "at the cost of halving temporal resolution. KPI distances stay correct."
         ),
     )
+    # ---- ByteTrack tuning ----
+    p.add_argument(
+        "--tracker-buffer", type=int, default=90,
+        help=(
+            "ByteTrack lost-track buffer (frames). Higher = tracks survive longer "
+            "occlusions before being dropped. Default 90 = ~3 s at 30 fps."
+        ),
+    )
+    p.add_argument(
+        "--tracker-conf", type=float, default=0.35,
+        help="ByteTrack track-activation confidence threshold (default 0.35).",
+    )
+    p.add_argument(
+        "--tracker-iou", type=float, default=0.7,
+        help="ByteTrack minimum matching IoU threshold (default 0.7).",
+    )
+    p.add_argument(
+        "--tracker-minframes", type=int, default=2,
+        help=(
+            "Minimum consecutive frames before a track is 'real'. Higher kills "
+            "1-frame flicker tracks. Default 2."
+        ),
+    )
     return p
 
 
@@ -430,7 +453,13 @@ def run(args: argparse.Namespace, cfg: Optional[Config] = None) -> int:
     board_drawer = TacticalBoard(cfg.board_width, cfg.board_height)
     classifier = TeamClassifier()
     ball_tracker = BallTracker(max_distance=150)
-    tracker = make_tracker()
+    tracker = make_tracker(
+        lost_track_buffer=args.tracker_buffer,
+        track_activation_threshold=args.tracker_conf,
+        minimum_matching_threshold=args.tracker_iou,
+        minimum_consecutive_frames=args.tracker_minframes,
+        frame_rate=int(round(fps)) or 30,
+    )
     kpi_tracker = KPITracker(fps=fps, board_width_px=cfg.board_width, board_height_px=cfg.board_height)
 
     # ---------- output base + run-lock ----------

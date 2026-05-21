@@ -28,10 +28,12 @@ from _shared import (
     file_mtime,
     inject_css,
     load_kpis,
+    load_positions,
     load_roster,
     output_dir_picker,
     render_sidebar_brand,
     save_roster,
+    suggest_track_merges,
 )
 
 # ---------------------------------------------------------------------------
@@ -50,9 +52,11 @@ render_sidebar_brand()
 
 out_dir = output_dir_picker(default="out")
 kpis_path = out_dir / "kpis.csv"
+positions_path = out_dir / "positions.jsonl"
 roster_path = out_dir / ROSTER_FILENAME
 
 kpis_df = load_kpis(str(kpis_path), file_mtime(kpis_path))
+positions, _ = load_positions(str(positions_path), file_mtime(positions_path))
 roster = load_roster(roster_path) or {
     "teams": {"0": {"label": TEAM_LABEL[0], "players": []},
               "1": {"label": TEAM_LABEL[1], "players": []}},
@@ -227,6 +231,74 @@ else:
     counts_cols[0].metric("Tracks total", len(track_df))
     counts_cols[1].metric("Assigned", n_assigned)
     counts_cols[2].metric("Players defined", len(players_flat))
+
+
+# ---------------------------------------------------------------------------
+# Step 2.5 — Auto-suggest track merges
+# ---------------------------------------------------------------------------
+
+
+if positions and players_flat:
+    st.markdown("### 2.5\u2002\u00b7\u2002Suggested merges (auto)")
+    st.caption(
+        "Heuristic: track A ends, track B starts within a few seconds nearby "
+        "and on the same team \u2014 probably the same player. Pick a target "
+        "player below and accept the suggestions you trust; each accepted pair "
+        "assigns *both* track IDs to that player."
+    )
+
+    col_g1, col_g2 = st.columns(2)
+    with col_g1:
+        gap_s = st.slider("Max time gap (s)", 0.5, 8.0, 3.0, 0.5,
+                          help="How long after track A ends can track B start?")
+    with col_g2:
+        gap_m = st.slider("Max metric distance (m)", 1.0, 20.0, 8.0, 1.0,
+                          help="How far can the player have moved during the gap?")
+
+    suggestions = suggest_track_merges(
+        positions, max_gap_seconds=gap_s, max_distance_m=gap_m,
+    )
+
+    if not suggestions:
+        st.caption("_No merge candidates found within these thresholds._")
+    else:
+        st.caption(
+            f"Found {len(suggestions)} candidate merge(s). Showing the top "
+            "20 (best matches first). Pick the player to assign both tracks "
+            "to, then click Accept."
+        )
+        for a, b, score in suggestions[:20]:
+            cols = st.columns([2, 2, 2, 4, 2])
+            current_a = roster["assignments"].get(str(a), "(unassigned)")
+            current_b = roster["assignments"].get(str(b), "(unassigned)")
+            cols[0].markdown(f"**#{a}** \u2192 #{b}")
+            cols[1].caption(f"score {score:.2f}")
+            cols[2].caption(
+                f"now: {('—' if current_a == '(unassigned)' else current_a)} / "
+                f"{('—' if current_b == '(unassigned)' else current_b)}"
+            )
+            target = cols[3].selectbox(
+                "Assign both to",
+                ["(skip)"] + [pid for pid, _, _ in players_flat],
+                index=0,
+                key=f"merge_target_{a}_{b}",
+                label_visibility="collapsed",
+                format_func=lambda pid: (
+                    "(skip)" if pid == "(skip)" else
+                    next((label for pid_, label, _ in players_flat
+                          if pid_ == pid), pid)
+                ),
+            )
+            if cols[4].button("Accept", key=f"merge_accept_{a}_{b}",
+                              disabled=(target == "(skip)"),
+                              use_container_width=True):
+                roster["assignments"][str(a)] = target
+                roster["assignments"][str(b)] = target
+                save_roster(roster_path, roster)
+                st.toast(f"Assigned #{a} and #{b} to {target}",
+                         icon=":material/merge:")
+                st.cache_data.clear()
+                st.rerun()
 
 
 # ---------------------------------------------------------------------------

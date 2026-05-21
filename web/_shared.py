@@ -330,6 +330,89 @@ def all_players(roster: dict) -> List[Tuple[str, str, int]]:
     return out
 
 
+def suggest_track_merges(
+    positions: List[dict],
+    *,
+    max_gap_seconds: float = 3.0,
+    max_distance_m: float = 8.0,
+    pitch_width_m: float = 40.0,
+    pitch_height_m: float = 20.0,
+    board_w: int = DEFAULT_BOARD_W,
+    board_h: int = DEFAULT_BOARD_H,
+    min_track_frames: int = 10,
+) -> List[Tuple[int, int, float]]:
+    """Propose pairs of tracks that are probably the same physical player.
+
+    Heuristic (no appearance features, no extra deps):
+
+    1. Compute first/last frame, first/last position, team for each track.
+    2. For every pair (A, B) with A ending before B starts and a gap less
+       than ``max_gap_seconds``: if same team AND the metric distance from
+       ``last_pos(A)`` to ``first_pos(B)`` is below ``max_distance_m``,
+       emit a merge suggestion.
+
+    Returns ``[(track_a_id, track_b_id, score)]`` sorted by ``score`` (lower
+    score is a more confident merge). ``score`` combines temporal gap +
+    spatial distance.
+    """
+    if not positions:
+        return []
+
+    # Index per track
+    tracks: dict[int, dict] = {}
+    for rec in positions:
+        frame = rec["frame"]
+        t = rec.get("t", 0.0)
+        for p in rec.get("players", []):
+            pid = int(p["id"])
+            entry = tracks.setdefault(pid, {
+                "first_frame": frame, "last_frame": frame,
+                "first_t": t, "last_t": t,
+                "first_pos": (p["x"], p["y"]),
+                "last_pos": (p["x"], p["y"]),
+                "team": p.get("team", -1),
+                "count": 0,
+            })
+            entry["last_frame"] = frame
+            entry["last_t"] = t
+            entry["last_pos"] = (p["x"], p["y"])
+            entry["count"] += 1
+
+    # Filter out tiny fragments — they're noise either way
+    real_ids = [tid for tid, e in tracks.items() if e["count"] >= min_track_frames]
+    real_ids.sort(key=lambda tid: tracks[tid]["first_frame"])
+
+    m_per_px_x = pitch_width_m / board_w
+    m_per_px_y = pitch_height_m / board_h
+
+    suggestions: List[Tuple[int, int, float]] = []
+    for a in real_ids:
+        ea = tracks[a]
+        for b in real_ids:
+            if a == b:
+                continue
+            eb = tracks[b]
+            # B must start strictly after A ends
+            gap_t = eb["first_t"] - ea["last_t"]
+            if gap_t <= 0 or gap_t > max_gap_seconds:
+                continue
+            # Same team (treat -1 as "unknown / could match either")
+            if ea["team"] >= 0 and eb["team"] >= 0 and ea["team"] != eb["team"]:
+                continue
+            # Spatial proximity in metres
+            dx_m = (eb["first_pos"][0] - ea["last_pos"][0]) * m_per_px_x
+            dy_m = (eb["first_pos"][1] - ea["last_pos"][1]) * m_per_px_y
+            dist_m = (dx_m * dx_m + dy_m * dy_m) ** 0.5
+            if dist_m > max_distance_m:
+                continue
+            # Score: lower = more confident. Equal weight to time and distance.
+            score = gap_t / max_gap_seconds + dist_m / max_distance_m
+            suggestions.append((a, b, score))
+
+    suggestions.sort(key=lambda s: s[2])
+    return suggestions
+
+
 def apply_roster_to_kpis(kpis_df: pd.DataFrame, roster: Optional[dict]) -> pd.DataFrame:
     """Aggregate per-track KPIs into per-player KPIs using the roster's assignments.
 

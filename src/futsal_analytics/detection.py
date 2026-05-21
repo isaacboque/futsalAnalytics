@@ -198,9 +198,34 @@ def setup_detectors(config: Config) -> Optional[Any]:
         return None
 
 
-def make_tracker() -> Any:
-    """Construct a fresh ByteTrack tracker from supervision."""
-    return sv.ByteTrack()
+def make_tracker(
+    *,
+    lost_track_buffer: int = 90,
+    track_activation_threshold: float = 0.35,
+    minimum_matching_threshold: float = 0.7,
+    minimum_consecutive_frames: int = 2,
+    frame_rate: int = 30,
+) -> Any:
+    """Construct a fresh ByteTrack tracker tuned for futsal.
+
+    Defaults are deliberately different from supervision's stock ByteTrack:
+
+    - ``lost_track_buffer=90`` (3 s @ 30 fps) lets a track survive normal
+      player-to-player occlusions instead of dying after 1 s.
+    - ``minimum_consecutive_frames=2`` drops one-frame flicker detections
+      that would otherwise spawn permanent ghost tracks.
+    - ``track_activation_threshold=0.35`` filters more false positives
+      before they become tracks.
+    - ``minimum_matching_threshold=0.7`` allows faster apparent player
+      motion between frames (broadcast pan can produce > 0.8 IoU misses).
+    """
+    return sv.ByteTrack(
+        lost_track_buffer=lost_track_buffer,
+        track_activation_threshold=track_activation_threshold,
+        minimum_matching_threshold=minimum_matching_threshold,
+        minimum_consecutive_frames=minimum_consecutive_frames,
+        frame_rate=frame_rate,
+    )
 
 
 # ---------------------------------------------------------------------------
