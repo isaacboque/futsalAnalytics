@@ -1,125 +1,161 @@
-# Football Match Analysis System
+# Futsal Analytics
 
-Advanced video analysis system for football (soccer) matches using AI-powered computer vision. Extracts tactical positioning, player performance metrics, and real-time match statistics from YouTube streams.
+Real-time futsal match analysis from YouTube streams using YOLO object detection,
+HSV-based team classification, and perspective-corrected tactical board rendering.
 
 ## Features
 
-- **YOLO11 Detection**: Real-time player and ball detection using YOLOv11n
-- **Multi-Object Tracking**: ByteTrack for persistent player identification across frames
-- **Team Classification**: Automatic team assignment using HSV color-based K-Means clustering
-- **Perspective Transformation**: Piecewise homography for accurate 2D tactical board mapping
-- **KPI Computation**: 
-  - Distance covered (in metres)
-  - Duel frequency (player-to-player proximity events)
-  - Possession time (seconds)
-  - Sprint detection (>7 m/s threshold)
-- **Live Visualization**: 
-  - Camera view with bounding boxes
-  - Tactical board with player positions
-- **CSV Export**: Exportable match statistics
-
-## Installation
-
-### Requirements
-- Python 3.8+
-- NVIDIA GPU (optional, for faster inference)
-- 2GB+ RAM
-
-### Setup
-
-```bash
-# Create virtual environment (recommended)
-python -m venv venv
-venv\Scripts\activate
-
-# Install dependencies
-pip install opencv-python numpy supervision ultralytics scikit-learn yt-dlp
-
-# Download YOLO model (optional - auto-downloads on first run)
-pip install ultralytics
-yolo detect download model=yolov11n.pt
-```
-
-## Usage
-
-```bash
-python "# LATEST.py"
-```
-
-### Interactive Workflow
-
-1. **Input YouTube URL**: Provide a public football match video URL
-2. **Optional Start Time**: Skip to a specific time (MM:SS format)
-3. **Field Calibration**: Click 6 points on the first frame:
-   - Top-left corner
-   - Top-right corner
-   - Bottom-right corner
-   - Bottom-left corner
-   - Halfway line (top)
-   - Halfway line (bottom)
-4. **Live Monitoring**: Watch real-time detection and tactical mapping
-5. **Export Results**: Press Q to stop and save KPI statistics to CSV
-
-## Configuration
-
-Edit the `Config` dataclass in the script to customize:
-
-```python
-config = Config(
-    board_width=800,           # Tactical board dimensions
-    board_height=400,
-    smoothing_window=5,        # Position smoothing (frames)
-    duel_radius_px=40,         # Proximity threshold for duels
-    possession_radius_px=50,   # Proximity threshold for possession
-    yolo_conf_threshold=0.3,   # Detection confidence
-)
-```
+- **YOLO11 detection** — real-time player and ball detection from a YouTube stream
+- **Interactive 6-point field calibration** — adapt to any fixed side-camera angle
+- **Team colour classification** — K-Means on HSV jersey colours (2 teams + referee)
+- **Perspective mapping** — projects camera-space positions to an overhead tactical board
+- **Ball tracking** — temporal smoothing to stabilise ball position across frames
+- **Dual live view** — camera view with bounding boxes + overhead tactical board
 
 ## Architecture
 
-- **TeamClassifier**: K-Means clustering on HSV jersey colors (identifies 2 teams + referee)
-- **PositionSmoother**: Temporal averaging to reduce detection jitter
-- **PiecewiseTransformer**: Split domain perspective transformation for accuracy
-- **KPITracker**: Accumulates performance metrics per player
-- **TacticalBoard**: Real-time rendering of match state
+```
+YouTube URL
+    │
+    ▼
+open_youtube_stream()          stream.py
+    │
+    ▼
+FieldCalibrator.calibrate()    calibration.py   (interactive UI — 6 drag points)
+    │
+    ├── FieldValidator          field.py         (polygon filter)
+    └── SimpleFieldMapper       field.py         (homography → board coords)
+    │
+    ▼
+process_frame() loop           detection.py
+    ├── YOLO predict
+    ├── TeamClassifier          detection.py     (K-Means on HSV)
+    ├── BallTracker             detection.py     (temporal smoothing)
+    └── TacticalBoard.draw_state()  board.py
+```
 
-## Output
+## Installation
 
-**CSV Export Format** (`match_data.csv`):
-- `track_id`: Player identifier
-- `team`: Team assignment (0, 1, or -1 for referee)
-- `distance_m`: Total distance covered (metres)
-- `duel_frames`: Number of dueling events
-- `possession_s`: Total possession time (seconds)
-- `sprint_count`: Number of sprint events
+```bash
+git clone https://github.com/your-user/futsalAnalytics.git
+cd futsalAnalytics
+
+python -m venv venv
+venv\Scripts\activate          # Windows
+# source venv/bin/activate     # macOS / Linux
+
+pip install -e .
+```
+
+Dependencies are declared in `pyproject.toml`:
+`opencv-python`, `ultralytics`, `supervision`, `scikit-learn`, `yt-dlp`, `numpy`.
+
+The YOLO model (`yolo11n.pt`) is downloaded automatically on first run.
+
+## Usage
+
+### Full analysis pipeline
+
+```bash
+python -m futsal_analytics
+# or, after pip install -e .
+futsal-analytics
+```
+
+Interactive steps:
+1. Enter a public YouTube URL.
+2. Optionally enter a start time (`MM:SS`).
+3. A calibration window opens — drag the 6 yellow handles to the pitch boundary.
+4. Press **SPACE** to confirm. Analysis begins.
+5. Press **Q** to stop.
+
+### Calibration only
+
+```bash
+futsal-calibrate              # after pip install -e .
+python scripts/calibrate.py  # or directly
+```
+
+Saves the 6-point array to `calibration_points.npy`.
+
+## Configuration
+
+Edit `Config` in `src/futsal_analytics/config.py` to adjust thresholds:
+
+```python
+from futsal_analytics import Config
+
+cfg = Config(
+    board_width=700,
+    board_height=350,
+    yolo_conf_threshold=0.3,   # lower = more detections
+    min_players_for_kmeans=6,  # minimum players needed to train team classifier
+)
+```
+
+Pass a custom `Config` to `main(cfg)` or use it as the default by editing the dataclass.
+
+## Running the tests
+
+```bash
+pip install pytest
+pytest tests/
+```
+
+Tests cover `FieldCalibrator`, `FieldValidator`, `SimpleFieldMapper`,
+`BallTracker`, `TeamClassifier`, and `TacticalBoard` without opening any GUI
+windows or requiring a GPU.
+
+## Project structure
+
+```
+futsalAnalytics/
+├── pyproject.toml
+├── README.md
+├── src/
+│   └── futsal_analytics/
+│       ├── __init__.py
+│       ├── config.py       Config dataclass
+│       ├── stream.py       YouTube stream opening, frame reading
+│       ├── calibration.py  FieldCalibrator + run_standalone
+│       ├── field.py        FieldValidator, SimpleFieldMapper
+│       ├── detection.py    TeamClassifier, BallTracker, process_frame
+│       ├── board.py        TacticalBoard
+│       └── __main__.py     main() entry point
+├── scripts/
+│   └── calibrate.py        thin wrapper → futsal-calibrate entry point
+├── tests/
+│   ├── conftest.py
+│   ├── test_calibration.py
+│   ├── test_field.py
+│   └── test_detection.py
+└── docs/
+    ├── CALIBRATION.md      calibration guide
+    ├── CHANGELOG.md        version history
+    └── SAMPLE_VIDEOS.md    test video links
+```
 
 ## Troubleshooting
 
-### "yt-dlp not found"
+**`yt-dlp not found`**
 ```bash
 pip install --upgrade yt-dlp
 ```
 
-### "Could not open stream"
-- Verify the URL is public (not age-restricted)
-- Update yt-dlp: `pip install --upgrade yt-dlp`
+**Stream fails to open**
+- Verify the URL is public and not age-restricted.
+- Try `pip install --upgrade yt-dlp` — YouTube changes their API frequently.
 
-### Poor detection performance
-- Ensure adequate lighting in the video
-- Adjust `yolo_conf_threshold` in Config (lower = more detections, more false positives)
-- Use higher quality video resolution
+**Poor detection**
+- Lower `yolo_conf_threshold` to detect more players (more false positives too).
+- Ensure the calibration polygon tightly encloses the visible pitch area.
+- Higher-resolution video (720p+) improves detection accuracy.
 
-## Technical Notes
-
-- **Pitch Scale**: 800px board = 40m real width (1px = 0.05m)
-- **Sprint Threshold**: ~7 m/s (calculated frame-delta dependent)
-- **Duel Detection**: Pairwise distance comparison at 40px radius
-- **Referee Identification**: Smallest K-Means cluster (typically different jersey color)
+**Team classifier not activating**
+- Wait until at least `min_players_for_kmeans` (default 6) players are visible.
+- If jersey colours are very similar, the classifier may refuse to train
+  (insufficient colour variance).
 
 ## License
 
-MIT
-
-## Author
-
-Isaac Boque - isboque19@gmail.com
+MIT — see `pyproject.toml` for author information.
