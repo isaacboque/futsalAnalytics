@@ -116,6 +116,27 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+with st.expander("Reset this page", expanded=False):
+    st.caption(
+        "Clears the URL / uploaded file / calibration / queued subprocess "
+        "from the in-memory session. Disk artefacts (`cal.npy`, recorded "
+        "videos, KPIs) are kept."
+    )
+    if st.button("Reset session state", use_container_width=False):
+        # Release the cached VideoCapture before dropping the reference.
+        old_cap = st.session_state.get("an_cap")
+        if old_cap is not None:
+            try:
+                old_cap.release()
+            except Exception:
+                pass
+        # Drop every key starting with 'an_' so the next render re-initialises.
+        for k in list(st.session_state.keys()):
+            if k.startswith("an_") or k.startswith("_an_"):
+                del st.session_state[k]
+        st.toast("Session reset.", icon=":material/refresh:")
+        st.rerun()
+
 
 # ---------------------------------------------------------------------------
 # Step 1 — Source
@@ -167,6 +188,14 @@ else:
             target = out_dir_tmp / f"_source{ext}"
             existing_size = target.stat().st_size if target.exists() else -1
             if existing_size != uploaded.size:
+                # Sweep any previous _source.* with a different extension so we
+                # don't accumulate gigabytes of old uploads in the output dir.
+                for stale in out_dir_tmp.glob("_source.*"):
+                    if stale != target:
+                        try:
+                            stale.unlink()
+                        except OSError:
+                            pass
                 with open(target, "wb") as fp:
                     fp.write(uploaded.getbuffer())
                 st.toast(f"Saved {target.name} ({uploaded.size/1_048_576:.1f} MB)",
@@ -494,11 +523,28 @@ col_opts1, col_opts2 = st.columns(2)
 with col_opts1:
     rec_camera = st.checkbox("Record annotated camera (camera.mp4)", value=True)
     rec_board = st.checkbox("Record tactical board (board.mp4)", value=True)
-with col_opts2:
     device = st.selectbox("Device", ["auto", "cpu", "cuda"], index=0)
     retrain_every = st.number_input(
         "Retrain classifier every N frames (0 = never)",
         min_value=0, max_value=10_000, value=600, step=100,
+    )
+with col_opts2:
+    imgsz = st.select_slider(
+        "YOLO inference size (px)",
+        options=[320, 416, 480, 544, 640, 768, 960],
+        value=640,
+        help=(
+            "Lower = faster but may miss small/far players. 320 is roughly 4\u00d7 "
+            "faster than 960 on CPU."
+        ),
+    )
+    frame_stride = st.number_input(
+        "Frame stride (process every Nth frame)",
+        min_value=1, max_value=15, value=1, step=1,
+        help=(
+            "Stride 2 doubles throughput at the cost of halving temporal "
+            "resolution. KPI distances stay correct."
+        ),
     )
     snapshot_every = st.number_input(
         "Live preview every N frames (0 = off)",
@@ -533,11 +579,68 @@ if lock_path.exists():
 if foreign_running:
     st.error(
         f"Another analyser is already running in `{out_dir}` "
-        f"(lock {foreign_age:.1f}s old). Stop it before starting a new run, "
-        f"or delete `{lock_path}` manually if you're sure it's stale.\n\n"
+        f"(lock {foreign_age:.1f}s old).\n\n"
         f"```\n{foreign_info}\n```",
         icon=":material/lock:",
     )
+
+    # Try to extract the foreign PID so the kill button knows what to terminate.
+    foreign_pid: Optional[int] = None
+    for line in foreign_info.splitlines():
+        if line.startswith("pid="):
+            try:
+                foreign_pid = int(line.split("=", 1)[1].strip())
+            except ValueError:
+                pass
+            break
+
+    kill_col, force_col = st.columns([1, 1])
+    with kill_col:
+        if st.button(
+            f"Kill PID {foreign_pid}" if foreign_pid else "Kill running run",
+            use_container_width=True,
+            type="primary",
+            disabled=foreign_pid is None,
+        ):
+            import os
+            import signal
+
+            try:
+                os.kill(foreign_pid, signal.SIGTERM)
+                # Give it a moment to release the lock cleanly
+                for _ in range(20):
+                    time.sleep(0.1)
+                    try:
+                        os.kill(foreign_pid, 0)  # still alive?
+                    except (OSError, ProcessLookupError):
+                        break
+                else:
+                    # Fallback: force-kill
+                    try:
+                        os.kill(foreign_pid, signal.SIGKILL)
+                    except (AttributeError, OSError, ProcessLookupError):
+                        pass
+                st.toast(f"Stopped PID {foreign_pid}", icon=":material/stop_circle:")
+            except (OSError, ProcessLookupError) as exc:
+                st.toast(f"Could not stop PID {foreign_pid}: {exc}",
+                         icon=":material/error:")
+            # Clean up the (now-stale) lock file
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            st.rerun()
+    with force_col:
+        if st.button(
+            "Delete stale lock", use_container_width=True,
+            help="Use this if the lock looks stale but no process actually owns it.",
+        ):
+            try:
+                lock_path.unlink(missing_ok=True)
+                st.toast("Lock file removed", icon=":material/check:")
+            except OSError as exc:
+                st.toast(f"Could not delete lock: {exc}", icon=":material/error:")
+            st.rerun()
 
 
 def _build_cmd() -> List[str]:
@@ -558,6 +661,8 @@ def _build_cmd() -> List[str]:
         "--log-level", "INFO",
         "--snapshot-every", str(int(snapshot_every)),
         "--snapshot-dir", str(out_dir),
+        "--imgsz", str(int(imgsz)),
+        "--frame-stride", str(int(frame_stride)),
     ]
     if rec_camera:
         cmd += ["--save-video", str(out_dir / "camera.mp4")]

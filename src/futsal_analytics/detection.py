@@ -2,8 +2,11 @@
 Player and ball detection, team classification, persistent tracking,
 and per-frame processing.
 
-Heavy imports (ultralytics, supervision, sklearn) are loaded lazily so that
+Heavy ML imports (ultralytics, sklearn) are loaded lazily so that
 calibration-only workflows start quickly without loading the full ML stack.
+``supervision`` is imported eagerly because every per-frame call needs it
+anyway and the cost of re-importing inside ``process_frame`` was a
+measurable per-frame overhead.
 """
 
 import logging
@@ -11,6 +14,7 @@ from typing import Any, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import supervision as sv
 
 from futsal_analytics.board import TacticalBoard
 from futsal_analytics.config import Config
@@ -196,8 +200,6 @@ def setup_detectors(config: Config) -> Optional[Any]:
 
 def make_tracker() -> Any:
     """Construct a fresh ByteTrack tracker from supervision."""
-    import supervision as sv
-
     return sv.ByteTrack()
 
 
@@ -221,16 +223,19 @@ def process_frame(
     device: str = "cpu",
     frame_idx: int = 0,
     retrain_every: int = 0,
+    imgsz: int = 640,
 ) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, np.ndarray, int]], Optional[np.ndarray]]:
     """
     Run the full per-frame detection pipeline.
+
+    Args:
+        imgsz: YOLO inference input size (longer side, px). 640 is the
+            ultralytics default; smaller values trade accuracy for throughput.
 
     Returns:
         (annotated_camera_frame, tactical_board_image, players_with_ids, ball_board_pos)
         where ``players_with_ids`` is a list of (track_id, board_pos, team_id).
     """
-    import supervision as sv
-
     results = model.predict(
         frame,
         classes=[config.player_class_id, config.ball_class_id],
@@ -238,6 +243,7 @@ def process_frame(
         verbose=False,
         iou=0.5,
         device=device,
+        imgsz=imgsz,
     )[0]
 
     detections = sv.Detections.from_ultralytics(results)

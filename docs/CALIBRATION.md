@@ -1,10 +1,19 @@
 # Field Calibration
 
-Futsal Analytics uses a **6-point interactive calibration** to define the exact
-pitch boundary in the camera frame. This allows the system to:
+Futsal Analytics maps a side-camera frame onto an overhead 40 m × 20 m
+tactical board via a **6-point homography**. You define those 6 points once
+per camera angle and the result is saved as a `.npy` file you can re-use for
+every future analysis from the same broadcast.
 
-- Filter out detections that are outside the playing area.
-- Map camera-space player positions to the overhead tactical board.
+You can calibrate in two ways:
+
+1. **In the browser** — recommended, via the **Analyse** page of the Streamlit
+   app. Click-to-place + per-point re-place + an adjustable click margin so
+   points can sit outside the visible frame.
+2. **OpenCV window** — legacy, via the `futsal-calibrate` console script or
+   automatically when you run `futsal-analytics` without `--calibration`.
+
+Either path produces the same `(6, 2)` array of pixel coordinates.
 
 ---
 
@@ -32,11 +41,56 @@ pitch boundary in the camera frame. This allows the system to:
 | 4     | CB    | Centre-Bottom — halfway line, bottom edge|
 | 5     | BL    | Bottom-Left corner of the pitch          |
 
-The segment CT–CB represents the halfway line.
+The segment **CT–CB** represents the halfway line; including it gives the
+homography solver enough information to constrain mid-pitch geometry, which
+a 4-corner perspective transform cannot.
 
 ---
 
-## Controls
+## Web calibration (recommended)
+
+```bash
+pip install -e ".[viewer]"
+streamlit run web/app.py
+```
+
+Then in the browser:
+
+1. Open the **Analyse** page from the sidebar.
+2. Source: paste a YouTube URL or upload a local MP4.
+3. Click **Open stream**, then **Next frame** / **Skip 30 s** / **Skip 60 s**
+   to land on a wide-angle shot that shows the whole pitch.
+4. Optionally widen the **Click margin around the frame (%)** slider so you
+   can place points outside the visible frame (useful when the camera crops
+   a pitch corner — broadcast standard).
+5. Click 6 times in order: `TL → CT → TR → BR → CB → BL`. Each placed point
+   appears in the right-hand list. Click any list entry to **re-place** that
+   single point without redoing the others.
+6. Click **Save calibration**. The points are written to
+   `<output-dir>/cal.npy`.
+
+You can then start the run on the same page (it will pick up the freshly
+saved `cal.npy` automatically) or invoke the CLI with `--calibration
+<output-dir>/cal.npy`.
+
+---
+
+## OpenCV calibration
+
+If you don't want to install the `[viewer]` extras, the legacy desktop UI
+still works:
+
+```bash
+# After pip install -e .
+futsal-calibrate
+
+# Or directly without an install
+python scripts/calibrate.py
+python scripts/calibrate.py /path/to/video.mp4
+python scripts/calibrate.py https://www.youtube.com/watch?v=VIDEO_ID
+```
+
+### Controls
 
 | Key / Action          | Effect                                |
 |-----------------------|---------------------------------------|
@@ -45,24 +99,10 @@ The segment CT–CB represents the halfway line.
 | R                     | Reset all points to default positions |
 | ESC                   | Cancel and exit                       |
 
-Points can be dragged **outside the visible frame** to handle wide-angle cameras
-or when pitch corners are partially off-screen.
+Points can be dragged **outside the visible frame** to handle wide-angle
+cameras or when pitch corners are partially off-screen.
 
----
-
-## Running the calibrator standalone
-
-```bash
-# After pip install -e .
-futsal-calibrate
-
-# Or directly as a script (no install required)
-python scripts/calibrate.py
-python scripts/calibrate.py /path/to/video.mp4
-python scripts/calibrate.py https://www.youtube.com/watch?v=VIDEO_ID
-```
-
-The calibrated points are saved to `calibration_points.npy` in the current
+The saved 6-point array goes to `calibration_points.npy` in the current
 directory.
 
 ```python
@@ -74,11 +114,20 @@ points = np.load("calibration_points.npy")
 
 ---
 
-## Tips
+## Tips for a good calibration
 
-- **Fixed side camera**: The tool is designed for a single fixed side-camera
-  view, the standard futsal broadcast angle.
-- **Accuracy matters for the halfway line**: Position CT and CB precisely on
-  the halfway line — these determine which half of the board each player maps to.
-- **Wider polygon = fewer false rejections**: If players near the sidelines are
-  being filtered out, extend TL/BL outward.
+- **Fixed side-camera view**. The tool assumes a single fixed angle, the
+  standard futsal broadcast layout. Multi-camera coverage is not supported.
+- **Pick a wide-angle frame** without close-ups or replays. Use the frame
+  picker (`--allow-frame-pick` for the CLI, the **Next / Skip 30 s / Skip
+  60 s** buttons in the browser) to skip past intro graphics.
+- **Halfway-line accuracy matters**. CT and CB constrain which half of the
+  pitch each player maps to. A few pixels of slop here = several metres of
+  error at the far touchline.
+- **Wider polygon = fewer false rejections**. The `FieldValidator` drops
+  detections outside the polygon, so if players near the sidelines are being
+  filtered out, extend `TL` / `BL` / `TR` / `BR` outward (use the click
+  margin to place them beyond the visible frame).
+- **Re-use across matches**. The same camera angle gives the same
+  `cal.npy`; copy it into each match's output directory to skip
+  re-calibration.

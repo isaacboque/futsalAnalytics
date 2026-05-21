@@ -85,7 +85,13 @@ _POINT_LABELS = ["TL", "CT", "TR", "BR", "CB", "BL"]
 
 class FieldCalibrator:
     """
-    Interactive drag-and-drop calibration tool for a 6-point pitch polygon.
+    Interactive drag-and-drop calibration tool for a 6-point pitch polygon
+    (OpenCV-window based — kept for headless servers without a browser).
+
+    .. deprecated:: 0.3
+        Prefer the in-browser calibrator on the Streamlit **Analyse** page,
+        which offers the same click-to-place + off-frame padding workflow
+        without requiring an X server / native OpenCV display.
 
     Points can be dragged freely — including outside the video frame — to
     accommodate any camera angle or zoom level.

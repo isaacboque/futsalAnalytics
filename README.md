@@ -124,19 +124,27 @@ futsal-analytics \
 | `--snapshot-every N` | Write annotated camera + tactical board JPEGs every N frames for web live previews (0 = disabled) | `0` |
 | `--snapshot-dir DIR` | Where to write live snapshots (defaults to the same parent as `--save-positions`) | inferred |
 | `--snapshot-width PX` | Downscale snapshots to this width before encoding (0 = native) | `960` |
+| `--imgsz PX` | YOLO inference input size (longer side). Lower = faster, may miss small players | `640` |
+| `--frame-stride N` | Process every Nth frame (1 = every frame). Direct 1/N throughput multiplier | `1` |
+
+The CLI auto-detects local video file paths as `--url`, so the same `futsal-analytics`
+command works for both YouTube and local sources.
 
 The CLI also accepts a **local video file path** as `--url` — local paths are
 opened directly by OpenCV without going through yt-dlp.
 
 ## Web app
 
-A two-page Streamlit app:
+A three-page Streamlit app:
 
-- **Analyse** — paste a YouTube URL, pick a clean frame, place 6 calibration
-  points in the browser, and start the analyser. The CLI runs as a subprocess
-  with `--no-gui` and stdout streams into a live log panel.
-- **Viewer** — interactive Overview, Tracks, Heatmaps, Replay and Video tabs
-  for a single run.
+- **Analyse** — paste a YouTube URL or upload a local video, pick a clean
+  frame, place 6 calibration points in the browser, and start the analyser.
+  The CLI runs as a subprocess with `--no-gui` and stdout streams into a
+  live log panel (with live camera + tactical-board previews).
+- **Viewer** — interactive Overview, Tracks/Players, Heatmaps, Replay
+  (with optional synced camera video), and Video tabs for a single run.
+- **Roster** — define each team's roster once, assign track IDs to real
+  players, and the Viewer's dashboards roll up automatically per-player.
 
 ```bash
 pip install -e ".[viewer]"
@@ -240,7 +248,8 @@ futsalAnalytics/
 │   ├── README.md
 │   └── pages/
 │       ├── 1_Analyse.py   URL/local upload → in-browser calibration → run
-│       └── 2_Viewer.py    Overview / Tracks / Heatmaps / Replay / Video
+│       ├── 2_Viewer.py    Overview / Tracks(/Players) / Heatmaps / Replay / Video
+│       └── 3_Roster.py    Track ID → real player assignment
 └── docs/
     ├── CALIBRATION.md
     ├── CHANGELOG.md

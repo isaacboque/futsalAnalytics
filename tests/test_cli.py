@@ -17,7 +17,7 @@ def test_defaults():
     assert args.device == "auto"
     assert args.log_level == "INFO"
     assert args.max_frames == 0
-    assert args.retrain_every == 0
+    assert args.retrain_every == 600
     assert args.skip_when_behind == 0.0
 
 
@@ -87,3 +87,19 @@ def test_skip_when_behind_float():
     parser = build_parser()
     args = parser.parse_args(["--skip-when-behind", "2.5"])
     assert args.skip_when_behind == 2.5
+
+
+def test_imgsz_default_and_override():
+    parser = build_parser()
+    args = parser.parse_args([])
+    assert args.imgsz == 640
+    args = parser.parse_args(["--imgsz", "320"])
+    assert args.imgsz == 320
+
+
+def test_frame_stride_default_and_override():
+    parser = build_parser()
+    args = parser.parse_args([])
+    assert args.frame_stride == 1
+    args = parser.parse_args(["--frame-stride", "3"])
+    assert args.frame_stride == 3

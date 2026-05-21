@@ -33,6 +33,13 @@ yolo*
 *.log
 calibration_points.npy
 
+# Analyser output directories + their live artefacts
+out/
+out_*/
+_live_*.jpg
+_source.*
+.run.lock
+
 # OS
 .DS_Store
 Thumbs.db

@@ -251,6 +251,125 @@ def file_mtime(path: Path) -> float:
     return path.stat().st_mtime if path.exists() else 0.0
 
 
+# ---------------------------------------------------------------------------
+# Roster + per-player aggregation
+# ---------------------------------------------------------------------------
+#
+# A roster maps every recognised track ID onto a "real" player slot, so
+# per-player KPIs aggregate across all fragments of the same physical player
+# instead of treating each track ID as a separate player.
+#
+# Schema of ``out/roster.json``::
+#
+#     {
+#       "teams": {
+#         "0": {"label": "Home", "players": [{"id": "h_1", "name": "Player A", "number": 7}, ...]},
+#         "1": {"label": "Away", "players": [...]}
+#       },
+#       "assignments": { "42": "h_1", "17": "h_3", ... }   # track_id -> player_id
+#     }
+#
+# All keys/values are strings so the file is robust to JSON round-tripping.
+
+ROSTER_FILENAME = "roster.json"
+
+
+def load_roster(path: Path) -> Optional[dict]:
+    """Load a roster JSON file. Returns None if the file is missing or invalid."""
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as fp:
+            data = json.load(fp)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    data.setdefault("teams", {})
+    data.setdefault("assignments", {})
+    return data
+
+
+def save_roster(path: Path, roster: dict) -> None:
+    """Atomically write a roster JSON to *path*."""
+    import os
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.stem}.tmp{path.suffix}")
+    with tmp.open("w", encoding="utf-8") as fp:
+        json.dump(roster, fp, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def player_label(roster: dict, player_id: str) -> str:
+    """Return a 'Name #number' display label for a roster player_id."""
+    for team_data in roster.get("teams", {}).values():
+        for p in team_data.get("players", []):
+            if p.get("id") == player_id:
+                name = p.get("name", player_id)
+                num = p.get("number")
+                return f"{name} #{num}" if num is not None else name
+    return player_id
+
+
+def all_players(roster: dict) -> List[Tuple[str, str, int]]:
+    """Flatten roster into a [(player_id, display_label, team_int)] list."""
+    out: List[Tuple[str, str, int]] = []
+    for team_str, team_data in roster.get("teams", {}).items():
+        try:
+            team_int = int(team_str)
+        except ValueError:
+            team_int = -1
+        for p in team_data.get("players", []):
+            pid = p.get("id")
+            if not pid:
+                continue
+            num = p.get("number")
+            label = f"{p.get('name', pid)}" + (f" #{num}" if num is not None else "")
+            out.append((pid, label, team_int))
+    return out
+
+
+def apply_roster_to_kpis(kpis_df: pd.DataFrame, roster: Optional[dict]) -> pd.DataFrame:
+    """Aggregate per-track KPIs into per-player KPIs using the roster's assignments.
+
+    Returns a new DataFrame indexed by ``player_id`` with the same KPI columns
+    summed (or maxed, for top_speed). Unassigned tracks are grouped under
+    the player id ``"_unassigned"``.
+    """
+    if kpis_df is None or kpis_df.empty:
+        return pd.DataFrame()
+
+    df = kpis_df.copy()
+    assignments = (roster or {}).get("assignments", {}) or {}
+    df["player_id"] = df["track_id"].astype(str).map(assignments).fillna("_unassigned")
+
+    grouped = df.groupby("player_id").agg(
+        team=("team", "first"),
+        distance_m=("distance_m", "sum"),
+        top_speed_ms=("top_speed_ms", "max"),
+        sprint_count=("sprint_count", "sum"),
+        possession_s=("possession_s", "sum"),
+        duel_s=("duel_s", "sum"),
+        seen_s=("seen_s", "sum"),
+        track_count=("track_id", "nunique"),
+    ).reset_index()
+
+    if roster is not None:
+        grouped["display"] = grouped["player_id"].apply(
+            lambda pid: "Unassigned tracks" if pid == "_unassigned" else player_label(roster, pid)
+        )
+    else:
+        grouped["display"] = grouped["player_id"]
+
+    # Round to match the per-track CSV columns
+    for col in ("distance_m", "possession_s", "duel_s", "seen_s"):
+        grouped[col] = grouped[col].round(2)
+    grouped["top_speed_ms"] = grouped["top_speed_ms"].round(2)
+
+    return grouped
+
+
 def positions_to_dataframe(positions: List[dict]) -> pd.DataFrame:
     rows = []
     for rec in positions:

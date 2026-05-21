@@ -53,16 +53,44 @@ class FieldValidator:
         A detection is kept when either the foot position **or** the bounding-box
         centre lies within the pitch polygon.
         """
-        valid = []
-        for i, foot in enumerate(feet_coords):
-            foot_ok = self.is_within_field(foot)
-            bbox = detections.xyxy[i]
-            centre = np.array([(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2])
-            centre_ok = self.is_within_field(centre)
-            valid.append(foot_ok or centre_ok)
-            if not (foot_ok or centre_ok):
-                logger.debug("Filtered out detection %d: foot=%s, centre=%s", i, foot_ok, centre_ok)
-        return np.array(valid)
+        n = len(feet_coords)
+        if n == 0:
+            return np.zeros(0, dtype=bool)
+
+        # Bounding-box centres in one shot
+        xyxy = detections.xyxy
+        centres = np.column_stack(
+            [(xyxy[:, 0] + xyxy[:, 2]) / 2.0, (xyxy[:, 1] + xyxy[:, 3]) / 2.0]
+        )
+
+        # Cheap bbox pre-filter (axis-aligned)
+        in_bbox_feet = (
+            (feet_coords[:, 0] >= self.x_min) & (feet_coords[:, 0] <= self.x_max)
+            & (feet_coords[:, 1] >= self.y_min) & (feet_coords[:, 1] <= self.y_max)
+        )
+        in_bbox_centres = (
+            (centres[:, 0] >= self.x_min) & (centres[:, 0] <= self.x_max)
+            & (centres[:, 1] >= self.y_min) & (centres[:, 1] <= self.y_max)
+        )
+
+        # Only pay for pointPolygonTest where the cheap pre-filter passed.
+        valid = np.zeros(n, dtype=bool)
+        for i in range(n):
+            foot_ok = bool(in_bbox_feet[i]) and (
+                cv2.pointPolygonTest(self.field_polygon,
+                                     (float(feet_coords[i, 0]), float(feet_coords[i, 1])),
+                                     False) >= 0
+            )
+            if foot_ok:
+                valid[i] = True
+                continue
+            if in_bbox_centres[i]:
+                valid[i] = (
+                    cv2.pointPolygonTest(self.field_polygon,
+                                         (float(centres[i, 0]), float(centres[i, 1])),
+                                         False) >= 0
+                )
+        return valid
 
 
 class SimpleFieldMapper:

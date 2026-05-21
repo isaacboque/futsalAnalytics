@@ -10,7 +10,15 @@ pytest.importorskip("streamlit")  # web extras are optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "web"))
 
-from _shared import load_kpis, load_positions
+import pandas as pd
+from _shared import (
+    apply_roster_to_kpis,
+    load_kpis,
+    load_positions,
+    load_roster,
+    player_label,
+    save_roster,
+)
 
 
 class TestLoadPositionsRobust:
@@ -94,3 +102,94 @@ class TestLoadKpis:
         assert df is not None
         # The on_bad_lines='skip' option should keep us going
         assert len(df) >= 2
+
+
+class TestRoster:
+    def _sample_roster(self):
+        return {
+            "teams": {
+                "0": {"label": "Home", "players": [
+                    {"id": "h_1", "name": "Iniesta", "number": 6},
+                    {"id": "h_2", "name": "Jordi", "number": 10},
+                ]},
+                "1": {"label": "Away", "players": [
+                    {"id": "a_1", "name": "Ricardinho", "number": 11},
+                ]},
+            },
+            "assignments": {
+                "1": "h_1",
+                "2": "h_1",   # two tracks rolled up into Iniesta
+                "3": "a_1",
+            },
+        }
+
+    def test_save_load_roundtrip(self, tmp_path):
+        path = tmp_path / "roster.json"
+        original = self._sample_roster()
+        save_roster(path, original)
+        loaded = load_roster(path)
+        assert loaded["teams"]["0"]["label"] == "Home"
+        assert loaded["assignments"]["2"] == "h_1"
+
+    def test_save_is_atomic(self, tmp_path):
+        path = tmp_path / "roster.json"
+        save_roster(path, self._sample_roster())
+        assert path.exists()
+        assert not (tmp_path / "roster.tmp.json").exists()
+
+    def test_load_missing_returns_none(self, tmp_path):
+        assert load_roster(tmp_path / "nope.json") is None
+
+    def test_load_garbage_returns_none(self, tmp_path):
+        p = tmp_path / "roster.json"
+        p.write_text("this is not json", encoding="utf-8")
+        assert load_roster(p) is None
+
+    def test_player_label(self):
+        roster = self._sample_roster()
+        assert player_label(roster, "h_1") == "Iniesta #6"
+        assert player_label(roster, "a_1") == "Ricardinho #11"
+        # Falls back to the id when the player isn't in the roster
+        assert player_label(roster, "ghost") == "ghost"
+
+    def test_apply_roster_to_kpis_aggregates(self):
+        kpis = pd.DataFrame([
+            # Two tracks both belong to Iniesta — should combine
+            {"track_id": 1, "team": 0, "distance_m": 100.0,
+             "top_speed_ms": 7.5, "sprint_count": 5, "possession_s": 10.0,
+             "duel_s": 2.0, "seen_s": 30.0},
+            {"track_id": 2, "team": 0, "distance_m": 200.0,
+             "top_speed_ms": 9.0, "sprint_count": 10, "possession_s": 5.0,
+             "duel_s": 1.0, "seen_s": 60.0},
+            # One track for Ricardinho
+            {"track_id": 3, "team": 1, "distance_m": 150.0,
+             "top_speed_ms": 8.0, "sprint_count": 7, "possession_s": 8.0,
+             "duel_s": 3.0, "seen_s": 50.0},
+            # One unassigned track — goes to "_unassigned"
+            {"track_id": 99, "team": 1, "distance_m": 5.0,
+             "top_speed_ms": 4.0, "sprint_count": 0, "possession_s": 0.0,
+             "duel_s": 0.0, "seen_s": 2.0},
+        ])
+        roster = self._sample_roster()
+        agg = apply_roster_to_kpis(kpis, roster)
+
+        iniesta = agg[agg["player_id"] == "h_1"].iloc[0]
+        assert iniesta["distance_m"] == 300.0
+        assert iniesta["sprint_count"] == 15
+        assert iniesta["top_speed_ms"] == 9.0    # max, not sum
+        assert iniesta["track_count"] == 2
+        assert iniesta["display"] == "Iniesta #6"
+
+        unassigned = agg[agg["player_id"] == "_unassigned"].iloc[0]
+        assert unassigned["track_count"] == 1
+        assert unassigned["display"] == "Unassigned tracks"
+
+    def test_apply_roster_no_assignments_groups_all_as_unassigned(self):
+        kpis = pd.DataFrame([
+            {"track_id": 1, "team": 0, "distance_m": 50.0,
+             "top_speed_ms": 6.0, "sprint_count": 2, "possession_s": 0.0,
+             "duel_s": 0.0, "seen_s": 10.0},
+        ])
+        agg = apply_roster_to_kpis(kpis, None)
+        assert len(agg) == 1
+        assert agg.iloc[0]["player_id"] == "_unassigned"

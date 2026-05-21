@@ -98,6 +98,36 @@ def _refresh_lock(lock_path: Path) -> None:
         pass
 
 
+def _open_browser_friendly_writer(
+    path: Path, fps: float, frame_size: tuple,
+) -> cv2.VideoWriter:
+    """Open a VideoWriter using a browser-compatible codec when possible.
+
+    Tries `avc1` (H.264) first because every modern browser plays it in the
+    HTML5 video element. Falls back to `mp4v` if the H.264 encoder isn't
+    available on this OpenCV build, with a warning so the user knows the
+    resulting file may need re-encoding to play in Streamlit.
+    """
+    for fourcc_str in ("avc1", "H264", "mp4v"):
+        fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+        writer = cv2.VideoWriter(str(path), fourcc, fps, frame_size)
+        if writer.isOpened():
+            if fourcc_str == "mp4v":
+                logger.warning(
+                    "Wrote %s with mp4v codec \u2014 browsers may refuse to play "
+                    "it. Install openh264 / opencv-contrib-python for H.264 support.",
+                    path,
+                )
+            else:
+                logger.info("Opened %s writer (%s)", path.name, fourcc_str)
+            return writer
+        writer.release()
+    # Last-ditch: re-create one with mp4v and let the caller deal with it.
+    return cv2.VideoWriter(
+        str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, frame_size,
+    )
+
+
 def _write_snapshot(target: Path, image, max_width: int = 0) -> None:
     """Atomically write an annotated frame to *target* as a JPEG.
 
@@ -199,8 +229,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--retrain-every",
         type=int,
-        default=0,
-        help="Re-train team classifier every N frames to adapt to lighting (0 = never)",
+        default=600,
+        help=(
+            "Re-train team classifier every N frames to adapt to lighting changes. "
+            "0 disables retraining entirely. Default 600 (~20 s at 30 fps) matches "
+            "the Streamlit UI default."
+        ),
     )
     p.add_argument(
         "--skip-when-behind",
@@ -238,6 +272,24 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Downscale live snapshots to this width before encoding (0 = native "
             "resolution). Smaller previews mean less I/O and faster browser refresh."
+        ),
+    )
+    p.add_argument(
+        "--imgsz",
+        type=int,
+        default=640,
+        help=(
+            "YOLO inference input size (longer side, px). Lower = faster but may "
+            "miss small/far players. Try 320 for max speed, 960 for max accuracy."
+        ),
+    )
+    p.add_argument(
+        "--frame-stride",
+        type=int,
+        default=1,
+        help=(
+            "Process every Nth frame (1 = every frame). Stride 2 doubles throughput "
+            "at the cost of halving temporal resolution. KPI distances stay correct."
         ),
     )
     return p
@@ -349,7 +401,12 @@ def run(args: argparse.Namespace, cfg: Optional[Config] = None) -> int:
             cap.release()
             return 5
 
-        logger.info("Opening calibration UI...")
+        logger.info("Opening legacy OpenCV calibration UI...")
+        logger.info(
+            "Tip: the Streamlit Analyse page (`streamlit run web/app.py`) "
+            "now offers an in-browser 6-point calibrator that doesn't need "
+            "an OpenCV window. Pass --calibration <cal.npy> to skip this step."
+        )
         calibrator = FieldCalibrator(first_frame.copy())
         field_rect = calibrator.calibrate()
 
@@ -419,20 +476,14 @@ def run(args: argparse.Namespace, cfg: Optional[Config] = None) -> int:
         if args.save_video:
             args.save_video.parent.mkdir(parents=True, exist_ok=True)
             fh, fw = first_frame.shape[:2]
-            cam_writer = cv2.VideoWriter(
-                str(args.save_video),
-                cv2.VideoWriter_fourcc(*"mp4v"),
-                fps,
-                (fw, fh),
+            cam_writer = _open_browser_friendly_writer(
+                args.save_video, fps, (fw, fh),
             )
             logger.info("Recording annotated camera video → %s", args.save_video)
         if args.save_board_video:
             args.save_board_video.parent.mkdir(parents=True, exist_ok=True)
-            board_writer = cv2.VideoWriter(
-                str(args.save_board_video),
-                cv2.VideoWriter_fourcc(*"mp4v"),
-                fps,
-                (cfg.board_width, cfg.board_height),
+            board_writer = _open_browser_friendly_writer(
+                args.save_board_video, fps, (cfg.board_width, cfg.board_height),
             )
             logger.info("Recording tactical board video → %s", args.save_board_video)
 
@@ -453,14 +504,45 @@ def run(args: argparse.Namespace, cfg: Optional[Config] = None) -> int:
         logger.info("ANALYSIS STARTED — press Q in a window to stop (Ctrl+C in headless mode)")
         logger.info("=" * 70)
 
+        # Early-warning calibration validation. After CAL_WARN_AFTER frames,
+        # if more than CAL_WARN_OOB_PCT % of mapped positions fall outside the
+        # tactical board, the user almost certainly placed a calibration point
+        # in the wrong spot. Warn them once so they can stop the run early
+        # instead of discovering it hours later in the Viewer.
+        CAL_WARN_AFTER = 200
+        CAL_WARN_OOB_PCT = 30.0
+        cal_warning_emitted = False
+        cal_oob_count = 0
+        cal_total_count = 0
+
         # Process the initial frame too, since we already read it
         current_frame = first_frame
+        consecutive_read_failures = 0
+        REOPEN_AFTER_FAILED_READS = 30  # ~1 s at 30 fps
         while True:
             if current_frame is None:
                 ret, current_frame = cap.read()
                 if not ret or current_frame is None:
-                    logger.info("End of stream reached")
-                    break
+                    consecutive_read_failures += 1
+                    # On live streams, YouTube can revoke a CDN URL mid-match.
+                    # Attempt a one-shot re-open before giving up.
+                    if consecutive_read_failures >= REOPEN_AFTER_FAILED_READS:
+                        logger.warning(
+                            "Stream read failed %d times in a row \u2014 attempting "
+                            "to re-open the source.", consecutive_read_failures,
+                        )
+                        cap.release()
+                        new_cap = open_youtube_stream(url, cfg)
+                        if new_cap is not None and new_cap.isOpened():
+                            cap = new_cap
+                            consecutive_read_failures = 0
+                            logger.info("Stream re-opened; resuming.")
+                            continue
+                        logger.info("End of stream reached (re-open failed)")
+                        break
+                    time.sleep(0.05)
+                    continue
+                consecutive_read_failures = 0
 
             frame_idx += 1
             if frame_idx % 30 == 0:
@@ -500,6 +582,7 @@ def run(args: argparse.Namespace, cfg: Optional[Config] = None) -> int:
                     device=device,
                     frame_idx=frame_idx,
                     retrain_every=args.retrain_every,
+                    imgsz=args.imgsz,
                 )
             except Exception as exc:
                 logger.error("Frame %d error: %s", frame_idx, exc)
@@ -510,6 +593,31 @@ def run(args: argparse.Namespace, cfg: Optional[Config] = None) -> int:
             kpi_tracker.update(frame_idx - 1, players_frame, mapped_ball)
             if position_logger is not None:
                 position_logger.log(frame_idx - 1, (frame_idx - 1) / fps, players_frame, mapped_ball)
+
+            # Calibration early-warning: count board-pixel positions that fall
+            # outside the rendered pitch. A small fraction is normal; >30% by
+            # the time we've seen 200 frames means the user clicked the wrong
+            # spots in calibration.
+            if not cal_warning_emitted:
+                for _tid, _pos, _team in players_frame:
+                    cal_total_count += 1
+                    if (
+                        _pos[0] < 0 or _pos[0] > cfg.board_width
+                        or _pos[1] < 0 or _pos[1] > cfg.board_height
+                    ):
+                        cal_oob_count += 1
+                if cal_total_count >= CAL_WARN_AFTER:
+                    pct = 100.0 * cal_oob_count / cal_total_count
+                    if pct > CAL_WARN_OOB_PCT:
+                        logger.warning(
+                            "[CALIBRATION] %.1f%% of mapped positions (%d/%d) "
+                            "fall outside the %d\u00d7%d board. Your 6-point "
+                            "calibration is probably wrong \u2014 stop the run, "
+                            "re-calibrate, and try again.",
+                            pct, cal_oob_count, cal_total_count,
+                            cfg.board_width, cfg.board_height,
+                        )
+                    cal_warning_emitted = True
 
             # Overlay status
             elapsed = time.time() - t_start
@@ -550,6 +658,17 @@ def run(args: argparse.Namespace, cfg: Optional[Config] = None) -> int:
             if args.max_frames and frame_idx >= args.max_frames:
                 logger.info("Reached --max-frames=%d", args.max_frames)
                 break
+
+            # Frame-stride: skip the next (stride-1) frames so we only run
+            # detection on every Nth frame. Pure throughput multiplier at the
+            # cost of temporal resolution; KPI distances remain correct
+            # because frame_idx still advances.
+            if args.frame_stride > 1:
+                for _ in range(args.frame_stride - 1):
+                    ret, _skipped = cap.read()
+                    if not ret:
+                        break
+                    frame_idx += 1
 
             current_frame = None  # force next iteration to read a new one
 

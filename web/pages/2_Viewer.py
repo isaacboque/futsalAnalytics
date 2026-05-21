@@ -26,13 +26,16 @@ from _shared import (
     DEFAULT_BOARD_H,
     DEFAULT_BOARD_W,
     PLOTLY_LAYOUT,
+    ROSTER_FILENAME,
     TEAM_COLOR_HEX,
     TEAM_LABEL,
+    apply_roster_to_kpis,
     file_mtime,
     frame_to_players,
     inject_css,
     load_kpis,
     load_positions,
+    load_roster,
     output_dir_picker,
     pitch_background_png,
     positions_to_dataframe,
@@ -67,10 +70,12 @@ positions_path = out_dir / "positions.jsonl"
 kpis_path = out_dir / "kpis.csv"
 board_video_path = out_dir / "board.mp4"
 camera_video_path = out_dir / "camera.mp4"
+roster_path = out_dir / ROSTER_FILENAME
 
 positions, n_bad_positions = load_positions(str(positions_path), file_mtime(positions_path))
 kpis_df_raw = load_kpis(str(kpis_path), file_mtime(kpis_path))
 positions_df_raw = positions_to_dataframe(positions)
+roster = load_roster(roster_path)
 
 if n_bad_positions > 0:
     st.warning(
@@ -126,6 +131,132 @@ st.sidebar.caption(
     f"Showing **{n_filtered_tracks}** of {n_raw_tracks} tracks "
     f"({hidden_tracks} hidden)"
 )
+
+# ---------------------------------------------------------------------------
+# Optional roster aggregation
+# ---------------------------------------------------------------------------
+aggregate_by_player = False
+n_assigned = 0
+if roster is not None:
+    n_assigned = sum(
+        1 for tid in (kpis_df["track_id"].astype(str).tolist()
+                      if kpis_df is not None and not kpis_df.empty else [])
+        if tid in roster.get("assignments", {})
+    )
+    st.sidebar.markdown("###### Roster")
+    st.sidebar.caption(
+        f"`roster.json` loaded \u2014 {n_assigned}/{n_filtered_tracks} tracks assigned."
+    )
+    aggregate_by_player = st.sidebar.toggle(
+        "Aggregate by player",
+        value=True,
+        help=(
+            "Roll up per-track KPIs to one row per assigned player. "
+            "Unassigned tracks are grouped together."
+        ),
+    )
+else:
+    st.sidebar.markdown("###### Roster")
+    st.sidebar.caption(
+        "No `roster.json` in this folder. Open the **Roster** page to assign "
+        "tracks to real players."
+    )
+
+agg_kpis_df = None
+if aggregate_by_player and kpis_df is not None and not kpis_df.empty:
+    agg_kpis_df = apply_roster_to_kpis(kpis_df, roster)
+    # Replace kpis_df so all downstream tabs render per-player automatically.
+    # ``track_id`` here is actually the player display label (string).
+    if agg_kpis_df is not None and not agg_kpis_df.empty:
+        kpis_df = agg_kpis_df.rename(columns={"display": "track_id"}).drop(
+            columns=["player_id"], errors="ignore",
+        )
+
+
+def _format_track(i) -> str:
+    """Display label for a track / player id, works for both int and str."""
+    try:
+        return f"#{int(i)}"
+    except (TypeError, ValueError):
+        return str(i)
+
+
+def _classify_mp4(path: Path) -> str:
+    """Return one of: 'h264', 'mp4v', 'incomplete', 'unknown'.
+
+    cv2.VideoWriter writes the `moov` (metadata) atom only on .release(),
+    so a video from a killed/crashed analyser has just ftyp + mdat and no
+    codec info anywhere. Browsers and VLC both refuse such files; we want
+    to tell the user clearly instead of showing an opaque "MIME type"
+    error from the HTML5 video element.
+
+    The codec FourCC (`avc1` for H.264, `mp4v` for MP4 Visual) lives in
+    the `stsd` sample-description atom inside `moov`, which OpenCV writes
+    at the tail of the file. We scan both head and tail to be safe.
+    """
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fp:
+            head = fp.read(8192)
+            if size > 8192:
+                fp.seek(max(0, size - 131_072))
+                tail = fp.read()
+            else:
+                tail = b""
+    except OSError:
+        return "unknown"
+
+    combined = head + tail
+    if b"moov" not in combined:
+        return "incomplete"
+    if b"avc1" in combined or b"avcC" in combined:
+        return "h264"
+    if b"mp4v" in combined:
+        return "mp4v"
+    return "unknown"
+
+
+def _render_video_block(label: str, path: Path) -> None:
+    st.markdown(f"##### {label}")
+    kind = _classify_mp4(path)
+    size_mb = path.stat().st_size / 1_048_576
+
+    if kind == "h264":
+        st.video(str(path))
+    elif kind == "mp4v":
+        st.warning(
+            "This MP4 uses the `mp4v` codec, which most browsers refuse to "
+            "play. The file itself is intact \u2014 download it and open in "
+            "VLC, or re-run the analyser to get a browser-friendly "
+            "`avc1` / H.264 file.",
+            icon=":material/movie:",
+        )
+    elif kind == "incomplete":
+        st.error(
+            f"`{path.name}` is **structurally incomplete** \u2014 the analyser "
+            "was killed before it could write the MP4 trailer (`moov` atom). "
+            "Neither browsers nor VLC will play this file. Delete it and run "
+            "a fresh analysis.",
+            icon=":material/broken_image:",
+        )
+    else:
+        st.warning(
+            "Could not determine the codec of this file. Try the download "
+            "link and open it in VLC.",
+            icon=":material/help:",
+        )
+
+    try:
+        with path.open("rb") as fp:
+            st.download_button(
+                f"Download {path.name} ({size_mb:.1f} MB)",
+                data=fp,
+                file_name=path.name,
+                mime="video/mp4",
+                key=f"dl_{path.name}",
+            )
+    except OSError:
+        st.caption(f"`{path.name}` is locked (the analyser may still be writing it).")
 
 
 # ---------------------------------------------------------------------------
@@ -211,8 +342,9 @@ with st.expander("About \u201ctracks\u201d vs. \u201cplayers\u201d", expanded=Fa
         "duration threshold."
     )
 
+_tracks_tab_label = "Players" if aggregate_by_player else "Tracks"
 tab_overview, tab_players, tab_heatmaps, tab_replay, tab_video = st.tabs(
-    ["Overview", "Tracks", "Heatmaps", "Replay", "Video"]
+    ["Overview", _tracks_tab_label, "Heatmaps", "Replay", "Video"]
 )
 
 
@@ -294,7 +426,7 @@ with tab_overview:
         )
         leaderboard = kpis_df.nlargest(10, "top_speed_ms").copy()
         leaderboard["Team"] = leaderboard["team"].map(TEAM_LABEL).fillna("Unknown")
-        leaderboard["label"] = leaderboard["track_id"].apply(lambda i: f"#{int(i)}")
+        leaderboard["label"] = leaderboard["track_id"].apply(_format_track)
         fig = px.bar(
             leaderboard,
             x="top_speed_ms",
@@ -324,12 +456,19 @@ with tab_players:
     if kpis_df is None or kpis_df.empty:
         st.warning("kpis.csv not found or all rows filtered out.")
     else:
-        st.info(
-            "These rows are **per-track**, not per-player. The same physical player "
-            "may appear in several rows. Adjust the sidebar filter to hide short "
-            "fragments.",
-            icon=":material/info:",
-        )
+        if aggregate_by_player:
+            st.success(
+                f"Per-player KPIs: rolled up across the {n_assigned} track(s) "
+                "assigned to each player via the **Roster** page.",
+                icon=":material/check_circle:",
+            )
+        else:
+            st.info(
+                "These rows are **per-track**, not per-player. The same physical player "
+                "may appear in several rows. Open the **Roster** page to assign tracks "
+                "to real players, or use the sidebar filter to hide short fragments.",
+                icon=":material/info:",
+            )
 
         display_df = kpis_df.copy()
         display_df["Team"] = display_df["team"].map(TEAM_LABEL).fillna("Unknown")
@@ -338,14 +477,20 @@ with tab_players:
              "sprint_count", "possession_s", "duel_s", "seen_s"]
         ].sort_values("seen_s", ascending=False).reset_index(drop=True)
 
-        st.markdown("##### All tracks (filtered)")
+        st.markdown(
+            "##### All players" if aggregate_by_player else "##### All tracks (filtered)"
+        )
         st.dataframe(
             display_df,
             use_container_width=True,
             height=320,
             hide_index=True,
             column_config={
-                "track_id": st.column_config.NumberColumn("Track", width="small"),
+                "track_id": (
+                    st.column_config.TextColumn("Player", width="medium")
+                    if aggregate_by_player else
+                    st.column_config.NumberColumn("Track", width="small")
+                ),
                 "Team": st.column_config.TextColumn("Team", width="small"),
                 "seen_s": st.column_config.ProgressColumn(
                     "Seen (s)",
@@ -370,13 +515,13 @@ with tab_players:
 
         col_pick, col_radar = st.columns([1, 3])
         with col_pick:
-            player_ids = sorted(kpis_df["track_id"].unique().tolist())
+            player_ids = sorted(kpis_df["track_id"].astype(str).unique().tolist())
             selected_id = st.selectbox(
-                "Track",
+                "Player" if aggregate_by_player else "Track",
                 player_ids,
-                format_func=lambda i: f"#{int(i)}",
+                format_func=_format_track,
             )
-            player_row = kpis_df[kpis_df["track_id"] == selected_id].iloc[0]
+            player_row = kpis_df[kpis_df["track_id"].astype(str) == str(selected_id)].iloc[0]
             team = int(player_row["team"])
             st.metric("Team", TEAM_LABEL.get(team, "Unknown"))
             st.metric("Seen", f"{player_row['seen_s']:.1f} s")
@@ -393,18 +538,34 @@ with tab_players:
             )
             player_vals = player_row[metric_cols].values.astype(float)
 
-            squad_max = kpis_df[metric_cols].max().values.astype(float)
-            squad_max[squad_max == 0] = 1.0
-            player_norm = player_vals / squad_max
-            team_norm = team_avg / squad_max
+            # Percentile-rank normalisation across the (filtered) squad.
+            # Each metric maps to its empirical CDF, so axes carry equal
+            # weight regardless of unit and a single dominant track (e.g.
+            # very high "Seen") doesn't squash the rest of the chart.
+            def _percentile_norm(values: np.ndarray, target: float) -> float:
+                if values.size == 0:
+                    return 0.0
+                # Fraction of squad with value <= target
+                return float((values <= target).mean())
+
+            squad_values = kpis_df[metric_cols].values.astype(float)
+            player_norm = np.array([
+                _percentile_norm(squad_values[:, i], player_vals[i])
+                for i in range(len(metric_cols))
+            ])
+            team_norm = np.array([
+                _percentile_norm(squad_values[:, i], team_avg[i])
+                for i in range(len(metric_cols))
+            ])
 
             fig = go.Figure()
+            entity = "Player" if aggregate_by_player else "Track"
             fig.add_trace(
                 go.Scatterpolar(
                     r=np.concatenate([player_norm, [player_norm[0]]]),
                     theta=labels + [labels[0]],
                     fill="toself",
-                    name=f"Track #{int(selected_id)}",
+                    name=f"{entity} {_format_track(selected_id)}",
                     line=dict(color=ACCENT, width=2),
                     fillcolor="rgba(216,92,125,0.2)",
                 )
@@ -442,10 +603,35 @@ with tab_heatmaps:
     if positions_df.empty:
         st.warning("positions.jsonl is missing or empty.")
     else:
-        mode = st.radio("Group by", ["Per team", "Per track"], horizontal=True)
+        # Detect calibration that maps points outside the board. Calibration
+        # noise of a few pixels is normal; gross overflow (> 20%) usually
+        # means TL/BL/TR/BR were misplaced. Either way, the heatmap still
+        # renders because we clamp to the board's visible extent.
+        oob_count = int(
+            ((positions_df["x"] < 0) | (positions_df["x"] > DEFAULT_BOARD_W)
+             | (positions_df["y"] < 0) | (positions_df["y"] > DEFAULT_BOARD_H)).sum()
+        )
+        if oob_count > 0:
+            oob_pct = 100.0 * oob_count / len(positions_df)
+            st.caption(
+                f"{oob_count:,} of {len(positions_df):,} positions ({oob_pct:.0f}%) "
+                f"lie outside the {DEFAULT_BOARD_W}\u00d7{DEFAULT_BOARD_H} pitch area "
+                "\u2014 calibration drift. Clamped to the board edge so the heatmap renders."
+            )
+
+        mode = st.radio(
+            "Group by", ["All players", "Per team", "Per track"], horizontal=True,
+        )
         bg_url = pitch_background_png(DEFAULT_BOARD_W, DEFAULT_BOARD_H)
 
+        def _clamp(df: pd.DataFrame) -> pd.DataFrame:
+            out = df.copy()
+            out["x"] = out["x"].clip(0, DEFAULT_BOARD_W)
+            out["y"] = out["y"].clip(0, DEFAULT_BOARD_H)
+            return out
+
         def _heatmap(df: pd.DataFrame, title: str) -> go.Figure:
+            df = _clamp(df)
             fig = go.Figure(
                 go.Histogram2dContour(
                     x=df["x"],
@@ -480,7 +666,12 @@ with tab_heatmaps:
             )
             return fig
 
-        if mode == "Per team":
+        if mode == "All players":
+            st.plotly_chart(
+                _heatmap(positions_df, "All on-pitch positions"),
+                use_container_width=True,
+            )
+        elif mode == "Per team":
             cols = st.columns(2, gap="medium")
             for i, team_id in enumerate([0, 1]):
                 team_df = positions_df[positions_df["team"] == team_id]
@@ -532,7 +723,15 @@ with tab_replay:
         fig.update_yaxes(visible=False)
         st.plotly_chart(fig, use_container_width=True)
 
-        col_c1, col_c2, col_slider = st.columns([1, 1, 6])
+        # Estimate the source video's effective fps from the JSONL timestamps.
+        # Falls back to 25 if we can't infer it (e.g. fewer than 2 frames).
+        if n_frames >= 2:
+            inferred_fps = (n_frames - 1) / max(positions[-1]["t"] - positions[0]["t"], 1e-6)
+            source_fps = float(np.clip(inferred_fps, 1.0, 60.0))
+        else:
+            source_fps = 25.0
+
+        col_c1, col_c2, col_speed, col_slider = st.columns([1, 1, 1, 5])
         with col_c1:
             if st.button(
                 "Pause" if st.session_state["replay_playing"] else "Play",
@@ -543,6 +742,12 @@ with tab_replay:
             if st.button("Reset", use_container_width=True):
                 st.session_state["replay_idx"] = 0
                 st.session_state["replay_playing"] = False
+        with col_speed:
+            speed = st.select_slider(
+                "Speed", options=[0.25, 0.5, 1.0, 2.0, 4.0, 8.0], value=1.0,
+                label_visibility="collapsed",
+                help=f"Playback speed multiplier (source fps \u2248 {source_fps:.0f}).",
+            )
         with col_slider:
             idx = st.slider(
                 "Frame", min_value=0, max_value=n_frames - 1,
@@ -554,8 +759,38 @@ with tab_replay:
         record = positions[idx]
         players, ball = frame_to_players(record)
 
-        col_board, col_meta = st.columns([3, 1], gap="medium")
+        # Sync mode toggle: side-by-side camera + tactical board, both jumping
+        # to record["t"]. The camera video uses st.video(start_time=t) so the
+        # browser seeks to that moment when the slider changes.
+        camera_available = (
+            camera_video_path.exists()
+            and _classify_mp4(camera_video_path) == "h264"
+        )
+        sync_mode = False
+        if camera_available:
+            sync_mode = st.checkbox(
+                "Sync camera video to the timeline",
+                value=False,
+                help=(
+                    "Plays `camera.mp4` from the slider's current timestamp. "
+                    "Requires an H.264-encoded camera video."
+                ),
+            )
+
+        if sync_mode:
+            col_cam, col_board, col_meta = st.columns([4, 3, 2], gap="medium")
+            with col_cam:
+                st.markdown("**Camera**")
+                st.video(str(camera_video_path), start_time=float(record["t"]))
+                st.caption(
+                    f"Seeked to **t = {record['t']:.2f}s**. Scrub the frame "
+                    "slider above to re-seek."
+                )
+        else:
+            col_board, col_meta = st.columns([3, 1], gap="medium")
+
         with col_board:
+            st.markdown("**Tactical board**")
             board_drawer = TacticalBoard(DEFAULT_BOARD_W, DEFAULT_BOARD_H)
             img = board_drawer.draw_state(players, ball)
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -586,7 +821,8 @@ with tab_replay:
 
         if st.session_state["replay_playing"] and idx < n_frames - 1:
             st.session_state["replay_idx"] = idx + 1
-            time.sleep(0.05)
+            # Sleep for one source frame, scaled by the playback speed.
+            time.sleep(max(1.0 / (source_fps * speed), 0.01))
             st.rerun()
 
 
@@ -601,19 +837,15 @@ with tab_video:
         any_video = True
         c1, c2 = st.columns(2, gap="medium")
         with c1:
-            st.markdown("##### Tactical board")
-            st.video(str(board_video_path))
+            _render_video_block("Tactical board", board_video_path)
         with c2:
-            st.markdown("##### Annotated camera")
-            st.video(str(camera_video_path))
+            _render_video_block("Annotated camera", camera_video_path)
     elif board_video_path.exists():
         any_video = True
-        st.markdown("##### Tactical board")
-        st.video(str(board_video_path))
+        _render_video_block("Tactical board", board_video_path)
     elif camera_video_path.exists():
         any_video = True
-        st.markdown("##### Annotated camera")
-        st.video(str(camera_video_path))
+        _render_video_block("Annotated camera", camera_video_path)
 
     if not any_video:
         st.info(

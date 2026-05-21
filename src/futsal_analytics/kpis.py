@@ -132,8 +132,10 @@ class KPITracker:
                 dt = t - st.last_time
                 if dt > 0:
                     speed = step_m / dt
-                    # Cap implausible jumps (track-ID swap, teleport)
-                    if speed < 12.0:  # 12 m/s is faster than world-record sprint
+                    # 10 m/s ≈ 36 km/h — already faster than the world-record
+                    # 100 m sprint average. Anything above is almost certainly
+                    # a track-ID swap teleport, so drop the sample entirely.
+                    if speed < 10.0:
                         st.distance_m += step_m
                         st.top_speed_ms = max(st.top_speed_ms, speed)
                         if speed >= self.sprint_threshold_ms:
