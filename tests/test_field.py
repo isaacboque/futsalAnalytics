@@ -1,4 +1,4 @@
-"""Tests for FieldValidator and SimpleFieldMapper."""
+"""Tests for FieldValidator and SimpleFieldMapper (6-point homography)."""
 
 import numpy as np
 import pytest
@@ -38,7 +38,6 @@ class TestIsWithinField:
 
     def test_edge_point_is_accepted(self, default_polygon):
         fv = FieldValidator(default_polygon)
-        # TL corner is on the boundary
         assert fv.is_within_field(default_polygon[0])
 
 
@@ -59,7 +58,7 @@ class TestFilterDetections:
         dets = self._MockDetections(bboxes)
         feet = np.array([centre])
         mask = fv.filter_detections(dets, feet)
-        assert mask[0] is np.bool_(True)
+        assert bool(mask[0]) is True
 
     def test_outside_detections_rejected(self, default_polygon):
         fv = FieldValidator(default_polygon)
@@ -67,39 +66,76 @@ class TestFilterDetections:
         dets = self._MockDetections(bboxes)
         feet = np.array([[-500.0, -500.0]])
         mask = fv.filter_detections(dets, feet)
-        assert mask[0] is np.bool_(False)
+        assert bool(mask[0]) is False
 
 
 # ---------------------------------------------------------------------------
-# SimpleFieldMapper
+# SimpleFieldMapper — 6-point homography
 # ---------------------------------------------------------------------------
 
 
-class TestSimpleFieldMapper:
-    def test_corner_maps_to_board_corner(self, default_polygon):
-        board_w, board_h = 700, 350
-        mapper = SimpleFieldMapper(default_polygon, board_w, board_h)
-        # TL (index 0) → board (0, 0)
+class TestSimpleFieldMapperSixPoint:
+    def test_uses_six_point_mode(self, default_polygon):
+        mapper = SimpleFieldMapper(default_polygon, 700, 350)
+        assert "6-point" in mapper._mode
+
+    def test_tl_maps_to_origin(self, default_polygon):
+        mapper = SimpleFieldMapper(default_polygon, 700, 350)
         result = mapper.transform(default_polygon[0])
         assert result[0] == pytest.approx(0.0, abs=2.0)
         assert result[1] == pytest.approx(0.0, abs=2.0)
 
-    def test_tr_corner_maps_to_board_top_right(self, default_polygon):
-        board_w, board_h = 700, 350
-        mapper = SimpleFieldMapper(default_polygon, board_w, board_h)
-        # TR (index 2) → board (board_w, 0)
+    def test_tr_maps_to_board_top_right(self, default_polygon):
+        mapper = SimpleFieldMapper(default_polygon, 700, 350)
         result = mapper.transform(default_polygon[2])
-        assert result[0] == pytest.approx(board_w, abs=2.0)
+        assert result[0] == pytest.approx(700, abs=2.0)
         assert result[1] == pytest.approx(0.0, abs=2.0)
+
+    def test_br_maps_to_board_bottom_right(self, default_polygon):
+        mapper = SimpleFieldMapper(default_polygon, 700, 350)
+        result = mapper.transform(default_polygon[3])
+        assert result[0] == pytest.approx(700, abs=2.0)
+        assert result[1] == pytest.approx(350, abs=2.0)
+
+    def test_bl_maps_to_board_bottom_left(self, default_polygon):
+        mapper = SimpleFieldMapper(default_polygon, 700, 350)
+        result = mapper.transform(default_polygon[5])
+        assert result[0] == pytest.approx(0.0, abs=2.0)
+        assert result[1] == pytest.approx(350, abs=2.0)
+
+    def test_ct_maps_to_top_centre(self, default_polygon):
+        """The 6-point homography respects the halfway-line points."""
+        mapper = SimpleFieldMapper(default_polygon, 700, 350)
+        result = mapper.transform(default_polygon[1])  # CT
+        assert result[0] == pytest.approx(350, abs=5.0)
+        assert result[1] == pytest.approx(0.0, abs=5.0)
+
+    def test_cb_maps_to_bottom_centre(self, default_polygon):
+        mapper = SimpleFieldMapper(default_polygon, 700, 350)
+        result = mapper.transform(default_polygon[4])  # CB
+        assert result[0] == pytest.approx(350, abs=5.0)
+        assert result[1] == pytest.approx(350, abs=5.0)
 
     def test_invalid_point_returns_zeros(self, default_polygon):
         mapper = SimpleFieldMapper(default_polygon, 700, 350)
         result = mapper.transform(np.array([-1.0, -1.0]))
         np.testing.assert_array_equal(result, [0.0, 0.0])
 
-    def test_accepts_fewer_than_six_points(self):
-        four_pts = np.array(
-            [[0, 0], [100, 0], [100, 50], [0, 50]], dtype=np.float32
-        )
+    def test_transform_batch(self, default_polygon):
+        mapper = SimpleFieldMapper(default_polygon, 700, 350)
+        pts = np.array([default_polygon[0], default_polygon[2], default_polygon[5]])
+        result = mapper.transform_batch(pts)
+        assert result.shape == (3, 2)
+        assert result[0][0] == pytest.approx(0.0, abs=2.0)
+        assert result[1][0] == pytest.approx(700, abs=2.0)
+
+
+class TestSimpleFieldMapperFallback:
+    def test_four_point_fallback(self):
+        four_pts = np.array([[0, 0], [100, 0], [100, 50], [0, 50]], dtype=np.float32)
         mapper = SimpleFieldMapper(four_pts, 700, 350)
-        assert mapper.M is not None
+        assert "4-point" in mapper._mode
+
+    def test_raises_with_three_points(self):
+        with pytest.raises(ValueError):
+            SimpleFieldMapper(np.array([[0, 0], [1, 0], [0, 1]], dtype=np.float32), 700, 350)

@@ -1,4 +1,4 @@
-"""Field geometry: polygon validation and perspective mapping."""
+"""Field geometry: polygon validation and 6-point homography mapping."""
 
 import logging
 
@@ -17,12 +17,6 @@ class FieldValidator:
     """
 
     def __init__(self, field_polygon: np.ndarray) -> None:
-        """
-        Args:
-            field_polygon: Array of shape (6, 2) defining the pitch boundary.
-                           Fewer than 6 points are accepted with a warning;
-                           at least 4 are required.
-        """
         if len(field_polygon) < 4:
             raise ValueError(f"At least 4 calibration points required, got {len(field_polygon)}")
         if len(field_polygon) < 6:
@@ -57,13 +51,6 @@ class FieldValidator:
 
         A detection is kept when either the foot position **or** the bounding-box
         centre lies within the pitch polygon.
-
-        Args:
-            detections: ``supervision.Detections`` object.
-            feet_coords: Array of shape (N, 2) — one bottom-centre point per detection.
-
-        Returns:
-            Boolean array of shape (N,).
         """
         valid = []
         for i, foot in enumerate(feet_coords):
@@ -79,63 +66,64 @@ class FieldValidator:
 
 class SimpleFieldMapper:
     """
-    Maps camera-space coordinates to tactical-board coordinates via perspective
-    homography.
+    Maps camera-space coordinates to tactical-board coordinates.
 
-    Uses the four corner points (TL, TR, BR, BL — indices 0, 2, 3, 5) of the
-    6-point calibration array to compute a perspective transform.  The two
-    halfway-line points (CT, CB) are stored but not used in the transform.
+    Uses **all 6 calibration points** (TL, CT, TR, BR, CB, BL) as
+    correspondences into a least-squares homography via ``cv2.findHomography``.
+    This is more accurate than the 4-corner ``getPerspectiveTransform`` because
+    the halfway-line points (CT, CB) constrain the mid-pitch geometry.
+
+    Destination layout on the board:
+
+        TL=(0, 0)              CT=(W/2, 0)              TR=(W, 0)
+        BL=(0, H)              CB=(W/2, H)              BR=(W, H)
     """
 
     def __init__(self, field_rect: np.ndarray, board_width: int, board_height: int) -> None:
         """
         Args:
-            field_rect: Array of shape (6, 2) — ``[TL, CT, TR, BR, CB, BL]``.
+            field_rect: Array of shape (>=4, 2). Six points use the 6-point
+                        homography; four points fall back to the corner-only
+                        perspective transform.
             board_width: Width of the output tactical board in pixels.
             board_height: Height of the output tactical board in pixels.
         """
-        if len(field_rect) < 6:
-            logger.warning("Expected 6 points, got %d — using available corners", len(field_rect))
-            corners = field_rect[:4].astype(np.float32)
-        else:
-            corners = np.array(
+        self.board_width = board_width
+        self.board_height = board_height
+
+        if len(field_rect) >= 6:
+            src = field_rect[:6].astype(np.float32)
+            dst = np.array(
                 [
-                    field_rect[0],  # TL
-                    field_rect[2],  # TR
-                    field_rect[3],  # BR
-                    field_rect[5],  # BL
+                    [0, 0],                                 # TL
+                    [board_width / 2.0, 0],                 # CT
+                    [board_width, 0],                       # TR
+                    [board_width, board_height],            # BR
+                    [board_width / 2.0, board_height],      # CB
+                    [0, board_height],                      # BL
                 ],
                 dtype=np.float32,
             )
+            self.M, _ = cv2.findHomography(src, dst, method=0)
+            self._mode = "6-point homography (least-squares)"
+        elif len(field_rect) >= 4:
+            corners = field_rect[:4].astype(np.float32)
+            dst = np.array(
+                [[0, 0], [board_width, 0], [board_width, board_height], [0, board_height]],
+                dtype=np.float32,
+            )
+            self.M = cv2.getPerspectiveTransform(corners, dst)
+            self._mode = "4-point perspective"
+        else:
+            raise ValueError(f"At least 4 calibration points required, got {len(field_rect)}")
 
-        self.ct = field_rect[1] if len(field_rect) > 1 else None
-        self.cb = field_rect[4] if len(field_rect) > 4 else None
+        if self.M is None:
+            raise RuntimeError("Failed to compute homography (degenerate point configuration?)")
 
-        dst = np.array(
-            [
-                [0, 0],
-                [board_width, 0],
-                [board_width, board_height],
-                [0, board_height],
-            ],
-            dtype=np.float32,
-        )
-
-        self.M = cv2.getPerspectiveTransform(corners, dst)
-        self.board_width = board_width
-        self.board_height = board_height
-        logger.info("SimpleFieldMapper: initialised with %d calibration points", len(field_rect))
+        logger.info("SimpleFieldMapper: %s, %d input points", self._mode, len(field_rect))
 
     def transform(self, pt: np.ndarray) -> np.ndarray:
-        """
-        Map a single camera-space point to board coordinates.
-
-        Args:
-            pt: Array [x, y].
-
-        Returns:
-            Array [x, y] in board coordinates.  Returns ``[0, 0]`` on error.
-        """
+        """Map a single camera-space point to board coordinates."""
         if len(pt) < 2 or pt[0] < 0 or pt[1] < 0:
             logger.debug("Invalid point: %s", pt)
             return np.array([0.0, 0.0])
@@ -147,3 +135,11 @@ class SimpleFieldMapper:
         except Exception as exc:
             logger.error("Transform error: %s", exc)
             return np.array([0.0, 0.0])
+
+    def transform_batch(self, pts: np.ndarray) -> np.ndarray:
+        """Map an array of shape (N, 2) of camera points to board coordinates."""
+        if len(pts) == 0:
+            return np.zeros((0, 2), dtype=np.float32)
+        reshaped = pts.reshape(-1, 1, 2).astype(np.float32)
+        transformed = cv2.perspectiveTransform(reshaped, self.M)
+        return transformed.reshape(-1, 2)

@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+viewer = ["streamlit>=1.30", "plotly>=5.18", "pandas>=2.0"]
 
 [project.scripts]
 futsal-analytics = "futsal_analytics.__main__:main"

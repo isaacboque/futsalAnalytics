@@ -1,5 +1,6 @@
 """
-Player and ball detection, team classification, and per-frame processing.
+Player and ball detection, team classification, persistent tracking,
+and per-frame processing.
 
 Heavy imports (ultralytics, supervision, sklearn) are loaded lazily so that
 calibration-only workflows start quickly without loading the full ML stack.
@@ -24,14 +25,22 @@ logger = logging.getLogger(__name__)
 
 
 class TeamClassifier:
-    """Assigns players to teams via K-Means clustering on HSV jersey colour."""
+    """
+    Assigns players to teams via K-Means clustering on HSV jersey colour.
+
+    Can be re-trained on a new batch of detections to adapt to lighting changes.
+    """
 
     def __init__(self, n_clusters: int = 3, n_init: int = 20) -> None:
         from sklearn.cluster import KMeans
 
+        self._KMeans = KMeans
+        self.n_clusters = n_clusters
+        self.n_init = n_init
         self.kmeans = KMeans(n_clusters=n_clusters, n_init=n_init, random_state=42)
         self.trained: bool = False
         self.ref_label: Optional[int] = None
+        self.last_trained_frame: int = -1
 
     @staticmethod
     def _safe_crop(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> np.ndarray:
@@ -62,17 +71,8 @@ class TeamClassifier:
         return features
 
     def train_teams(self, frame: np.ndarray, detections: Any, config: Config) -> bool:
-        """
-        Fit K-Means on jersey colours of the currently visible players.
-
-        Returns True on success.
-        """
+        """Fit K-Means on jersey colours of the currently visible players."""
         if len(detections) < config.min_players_for_kmeans:
-            logger.debug(
-                "[TRAIN] Not enough players (%d/%d)",
-                len(detections),
-                config.min_players_for_kmeans,
-            )
             return False
 
         try:
@@ -86,12 +86,18 @@ class TeamClassifier:
                 logger.warning("[TRAIN] Insufficient colour variance (hue var=%.1f)", hue_var)
                 return False
 
+            # Fresh KMeans instance each time to avoid sklearn warm-start side effects
+            self.kmeans = self._KMeans(n_clusters=self.n_clusters, n_init=self.n_init, random_state=42)
             self.kmeans.fit(features)
             self.trained = True
             counts = np.bincount(self.kmeans.labels_)
             self.ref_label = int(np.argmin(counts))
 
-            logger.info("[TRAIN] K-Means trained. Referee cluster=%d, distribution=%s", self.ref_label, list(counts))
+            logger.info(
+                "[TRAIN] K-Means trained. Referee cluster=%d, distribution=%s",
+                self.ref_label,
+                list(counts),
+            )
             return True
 
         except Exception as exc:
@@ -99,11 +105,7 @@ class TeamClassifier:
             return False
 
     def predict_team(self, frame: np.ndarray, bbox: np.ndarray) -> int:
-        """
-        Return 0 or 1 for team assignment, or -1 for referee.
-
-        Falls back to team 0 if the classifier has not been trained yet.
-        """
+        """Return 0 or 1 for team assignment, -1 for referee. Returns 0 if untrained."""
         if not self.trained:
             return 0
         try:
@@ -124,44 +126,33 @@ class TeamClassifier:
 
 
 class BallTracker:
-    """Simple frame-to-frame ball tracker with temporal position smoothing."""
+    """Frame-to-frame ball position smoother (not a true multi-object tracker)."""
 
-    def __init__(self, max_distance: float = 100) -> None:
-        """
-        Args:
-            max_distance: Maximum pixel displacement between consecutive frames
-                          before the position history is reset.
-        """
+    def __init__(self, max_distance: float = 100, history_size: int = 5) -> None:
         self.last_pos: Optional[np.ndarray] = None
         self.max_distance = max_distance
+        self.history_size = history_size
         self.ball_seen_count: int = 0
         self._history: List[np.ndarray] = []
 
     def update(self, current_pos: Optional[np.ndarray]) -> Optional[np.ndarray]:
-        """
-        Update with the ball's detected position this frame.
-
-        Args:
-            current_pos: Detected ball centre, or None if not visible.
-
-        Returns:
-            Smoothed position (mean of recent positions), or None.
-        """
+        """Update with the ball's detected position; returns smoothed position."""
         if current_pos is None:
             self.last_pos = None
+            self._history = []
             return None
 
         if self.last_pos is not None:
             dist = float(np.linalg.norm(current_pos - self.last_pos))
             if dist > self.max_distance:
-                logger.debug("Ball discontinuity detected (dist=%.1f) — resetting history", dist)
+                logger.debug("Ball discontinuity (dist=%.1f) — resetting history", dist)
                 self._history = []
 
         self.last_pos = current_pos.copy()
         self.ball_seen_count += 1
         self._history.append(current_pos.copy())
-        if len(self._history) > 5:
-            self._history = self._history[-5:]
+        if len(self._history) > self.history_size:
+            self._history = self._history[-self.history_size:]
 
         return np.mean(self._history, axis=0)
 
@@ -171,16 +162,22 @@ class BallTracker:
 # ---------------------------------------------------------------------------
 
 
+def resolve_device(device: str = "auto") -> str:
+    """Resolve 'auto' to 'cuda' if available, else 'cpu'."""
+    if device != "auto":
+        return device
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:  # noqa: BLE001 — torch DLL/OSError on broken installs
+        pass
+    return "cpu"
+
+
 def setup_detectors(config: Config) -> Optional[Any]:
-    """
-    Load the YOLO model specified in *config*.
-
-    Heavy imports are deferred to this call so the calibration UI starts
-    without loading the full ML stack.
-
-    Returns:
-        A ``ultralytics.YOLO`` instance, or ``None`` on failure.
-    """
+    """Load the YOLO model specified in *config*."""
     logger.info("[SETUP] Loading ML dependencies (ultralytics)...")
     try:
         from ultralytics import YOLO
@@ -197,6 +194,13 @@ def setup_detectors(config: Config) -> Optional[Any]:
         return None
 
 
+def make_tracker() -> Any:
+    """Construct a fresh ByteTrack tracker from supervision."""
+    import supervision as sv
+
+    return sv.ByteTrack()
+
+
 # ---------------------------------------------------------------------------
 # Per-frame processing pipeline
 # ---------------------------------------------------------------------------
@@ -211,33 +215,19 @@ def process_frame(
     board_drawer: TacticalBoard,
     ball_tracker: BallTracker,
     config: Config,
-    fps: float,  # noqa: ARG001  (reserved for future KPI use)
-) -> Tuple[np.ndarray, np.ndarray]:
+    fps: float,
+    *,
+    tracker: Any = None,
+    device: str = "cpu",
+    frame_idx: int = 0,
+    retrain_every: int = 0,
+) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, np.ndarray, int]], Optional[np.ndarray]]:
     """
-    Run the full per-frame detection pipeline without persistent player IDs.
-
-    Steps:
-        1. YOLO detection.
-        2. Size filter (discard tiny bboxes).
-        3. Field polygon filter (discard detections outside the pitch).
-        4. Team classification (lazy K-Means training on first sufficient batch).
-        5. Perspective mapping to board coordinates.
-        6. Ball tracking with temporal smoothing.
-        7. Annotation of camera frame and tactical board rendering.
-
-    Args:
-        frame: Raw BGR video frame.
-        model: Loaded YOLO model.
-        classifier: Team colour classifier.
-        mapper: Perspective mapper (camera → board).
-        field_validator: Pitch polygon validator.
-        board_drawer: Tactical board renderer.
-        ball_tracker: Ball position smoother.
-        config: System configuration.
-        fps: Video frame rate (reserved for future KPI calculations).
+    Run the full per-frame detection pipeline.
 
     Returns:
-        Tuple of (annotated_camera_frame, tactical_board_image).
+        (annotated_camera_frame, tactical_board_image, players_with_ids, ball_board_pos)
+        where ``players_with_ids`` is a list of (track_id, board_pos, team_id).
     """
     import supervision as sv
 
@@ -247,44 +237,70 @@ def process_frame(
         conf=config.yolo_conf_threshold,
         verbose=False,
         iou=0.5,
+        device=device,
     )[0]
 
     detections = sv.Detections.from_ultralytics(results)
     player_dets = detections[detections.class_id == config.player_class_id]
     ball_dets = detections[detections.class_id == config.ball_class_id]
 
-    logger.info("[DETECT] Players (raw)=%d  Ball=%d", len(player_dets), len(ball_dets))
-
-    # Size filter
+    # Size filter — scale by frame area to be resolution-independent.
+    # Reference: at 1280×720 (921,600 px) the min area is 300 px.
     if len(player_dets) > 0:
+        frame_area = frame.shape[0] * frame.shape[1]
+        min_area = max(50, int(300 * frame_area / (1280 * 720)))
         areas = (player_dets.xyxy[:, 2] - player_dets.xyxy[:, 0]) * (
             player_dets.xyxy[:, 3] - player_dets.xyxy[:, 1]
         )
-        player_dets = player_dets[areas > 300]
+        player_dets = player_dets[areas > min_area]
 
     # Pitch polygon filter
     if len(player_dets) > 0:
         feet = player_dets.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
         valid_mask = field_validator.filter_detections(player_dets, feet)
-        logger.info("[FILTER] Removed=%d  Inside field=%d", int(np.sum(~valid_mask)), int(np.sum(valid_mask)))
         player_dets = player_dets[valid_mask]
 
-    # Train classifier on the first frame with enough players
+    # ByteTrack: assign persistent IDs to surviving detections
+    if tracker is not None and len(player_dets) > 0:
+        try:
+            player_dets = tracker.update_with_detections(player_dets)
+        except Exception as exc:
+            logger.warning("ByteTrack update failed: %s", exc)
+
+    # (Re-)train classifier if needed
     if not classifier.trained and len(player_dets) >= config.min_players_for_kmeans:
-        classifier.train_teams(frame, player_dets, config)
+        if classifier.train_teams(frame, player_dets, config):
+            classifier.last_trained_frame = frame_idx
+    elif (
+        retrain_every > 0
+        and classifier.trained
+        and frame_idx - classifier.last_trained_frame >= retrain_every
+        and len(player_dets) >= config.min_players_for_kmeans
+    ):
+        if classifier.train_teams(frame, player_dets, config):
+            classifier.last_trained_frame = frame_idx
+            logger.info("[TRAIN] Classifier retrained at frame %d", frame_idx)
+
+    # Per-frame team-id cache: compute once per detection, reuse for mapping + annotation
+    team_cache: List[int] = []
+    if len(player_dets) > 0:
+        team_cache = [classifier.predict_team(frame, bbox) for bbox in player_dets.xyxy]
 
     # Map players to board
     players_frame: List[Tuple[int, np.ndarray, int]] = []
     if len(player_dets) > 0:
         feet = player_dets.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
-        team_counts: Dict[str, int] = {}
-        for i, foot in enumerate(feet):
-            team_id = classifier.predict_team(frame, player_dets.xyxy[i])
-            mapped = mapper.transform(foot)
-            players_frame.append((i + 1, mapped, team_id))
-            key = f"Team {team_id}" if team_id >= 0 else "Referee"
-            team_counts[key] = team_counts.get(key, 0) + 1
-        logger.info("[MAP] %d players on board | distribution: %s", len(player_dets), team_counts)
+        # tracker_id may be None per-detection (newly created); fall back to a sentinel
+        track_ids = (
+            player_dets.tracker_id
+            if player_dets.tracker_id is not None
+            else np.arange(1, len(player_dets) + 1)
+        )
+        mapped_all = mapper.transform_batch(feet)
+        for i, mapped in enumerate(mapped_all):
+            tid_raw = track_ids[i] if i < len(track_ids) else None
+            tid = int(tid_raw) if tid_raw is not None else -(i + 1)
+            players_frame.append((tid, mapped, team_cache[i]))
 
     # Ball
     current_ball: Optional[np.ndarray] = None
@@ -294,18 +310,30 @@ def process_frame(
             current_ball = mapper.transform(ball_center)
     mapped_ball = ball_tracker.update(current_ball)
 
-    # Annotate camera frame
+    # Annotate camera frame using cached team IDs
     annotated = frame.copy()
     for i, bbox in enumerate(player_dets.xyxy):
-        team_id = classifier.predict_team(frame, bbox)
-        color = (128, 128, 128) if team_id < 0 else TacticalBoard.TEAM_COLORS[team_id % 2]
+        team_id = team_cache[i]
+        color = TacticalBoard.REFEREE_COLOR if team_id < 0 else TacticalBoard.TEAM_COLORS[team_id % 2]
         x1, y1, x2, y2 = map(int, bbox)
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 3)
+        # Draw the persistent ID over each bbox
+        tid_raw = player_dets.tracker_id[i] if player_dets.tracker_id is not None else None
+        if tid_raw is not None:
+            cv2.putText(
+                annotated,
+                f"#{int(tid_raw)}",
+                (x1, y1 - 6),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                2,
+            )
 
     if len(ball_dets) > 0:
         bc = ball_dets.get_anchors_coordinates(sv.Position.CENTER)[0]
-        cv2.circle(annotated, (int(bc[0]), int(bc[1])), 8, (0, 165, 255), -1)
+        cv2.circle(annotated, (int(bc[0]), int(bc[1])), 8, TacticalBoard.BALL_COLOR, -1)
         cv2.circle(annotated, (int(bc[0]), int(bc[1])), 9, (255, 255, 255), 2)
 
     board_img = board_drawer.draw_state(players_frame, mapped_ball)
-    return annotated, board_img
+    return annotated, board_img, players_frame, mapped_ball

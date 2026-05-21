@@ -17,12 +17,68 @@ The CT–CB segment represents the halfway line of the pitch.
 """
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+def pick_calibration_frame(cap: "cv2.VideoCapture") -> Optional[np.ndarray]:
+    """
+    Step through video frames one at a time so the user can choose one suitable
+    for calibration (avoiding logos, replays, close-ups).
+
+    Controls:
+        SPACE — use the current frame
+        N     — advance one frame
+        F     — fast-forward 30 frames
+        ESC   — cancel
+
+    Returns:
+        The chosen frame, or None if cancelled / stream exhausted.
+    """
+    win = "Select calibration frame"
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        cv2.destroyWindow(win)
+        return None
+
+    while True:
+        display = frame.copy()
+        cv2.putText(
+            display,
+            "SPACE: use frame   N: next   F: +30   ESC: cancel",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+        )
+        cv2.imshow(win, display)
+        key = cv2.waitKey(0) & 0xFF
+
+        if key == ord(" "):
+            cv2.destroyWindow(win)
+            return frame
+        if key in (ord("n"), ord("N")):
+            ret, new = cap.read()
+            if ret and new is not None:
+                frame = new
+        elif key in (ord("f"), ord("F")):
+            for _ in range(30):
+                ret, new = cap.read()
+                if ret and new is not None:
+                    frame = new
+                else:
+                    break
+        elif key == 27:
+            cv2.destroyWindow(win)
+            return None
 
 _POINT_LABELS = ["TL", "CT", "TR", "BR", "CB", "BL"]
 
@@ -232,6 +288,28 @@ class FieldCalibrator:
         return self.points.copy()
 
 
+def load_calibration(path: Path) -> np.ndarray:
+    """Load a previously-saved 6-point calibration array from a .npy file."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Calibration file not found: {path}")
+    points = np.load(path).astype(np.float32)
+    if points.ndim != 2 or points.shape[1] != 2:
+        raise ValueError(f"Expected calibration array of shape (N, 2), got {points.shape}")
+    if len(points) < 4:
+        raise ValueError(f"Calibration file has only {len(points)} points (need at least 4)")
+    logger.info("Loaded %d calibration points from %s", len(points), path)
+    return points
+
+
+def save_calibration(points: np.ndarray, path: Path) -> None:
+    """Save a calibration array to a .npy file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path, points.astype(np.float32))
+    logger.info("Saved %d calibration points to %s", len(points), path)
+
+
 # ---------------------------------------------------------------------------
 # Entry point for `futsal-calibrate` console script
 # ---------------------------------------------------------------------------
@@ -285,7 +363,7 @@ def run_standalone() -> None:
     for i, (pt, label) in enumerate(zip(points, _POINT_LABELS)):
         print(f"  {i} ({label:2s}): x={pt[0]:7.2f}, y={pt[1]:7.2f}")
 
-    output = "calibration_points.npy"
-    np.save(output, points)
+    output = Path("calibration_points.npy")
+    save_calibration(points, output)
     print(f"\n[OK] Points saved to: {output}")
     print("[DONE] Calibration complete.\n")

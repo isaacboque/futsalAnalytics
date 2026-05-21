@@ -1,9 +1,14 @@
-"""Tests for FieldCalibrator (no GUI windows opened)."""
+"""Tests for FieldCalibrator + load/save calibration (no GUI windows opened)."""
 
 import numpy as np
 import pytest
 
-from futsal_analytics.calibration import FieldCalibrator, _POINT_LABELS
+from futsal_analytics.calibration import (
+    FieldCalibrator,
+    _POINT_LABELS,
+    load_calibration,
+    save_calibration,
+)
 
 
 class TestFieldCalibratorInit:
@@ -70,3 +75,27 @@ class TestDrawFrame:
         canvas = cal.draw_frame()
         assert canvas.shape == (cal.canvas_h, cal.canvas_w, 3)
         assert canvas.dtype == np.uint8
+
+
+class TestLoadSaveCalibration:
+    def test_round_trip(self, tmp_path, default_polygon):
+        path = tmp_path / "cal.npy"
+        save_calibration(default_polygon, path)
+        loaded = load_calibration(path)
+        np.testing.assert_array_almost_equal(loaded, default_polygon)
+
+    def test_missing_file_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            load_calibration(tmp_path / "missing.npy")
+
+    def test_too_few_points_raises(self, tmp_path):
+        path = tmp_path / "few.npy"
+        np.save(path, np.array([[0, 0], [1, 0], [0, 1]], dtype=np.float32))
+        with pytest.raises(ValueError):
+            load_calibration(path)
+
+    def test_wrong_shape_raises(self, tmp_path):
+        path = tmp_path / "wrong.npy"
+        np.save(path, np.array([0, 1, 2, 3, 4, 5], dtype=np.float32))
+        with pytest.raises(ValueError):
+            load_calibration(path)
