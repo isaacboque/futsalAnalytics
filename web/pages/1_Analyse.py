@@ -122,7 +122,7 @@ with st.expander("Reset this page", expanded=False):
         "from the in-memory session. Disk artefacts (`cal.npy`, recorded "
         "videos, KPIs) are kept."
     )
-    if st.button("Reset session state", use_container_width=False):
+    if st.button("Reset session state", width='content'):
         # Release the cached VideoCapture before dropping the reference.
         old_cap = st.session_state.get("an_cap")
         if old_cap is not None:
@@ -273,7 +273,7 @@ def _read_next(cap_: cv2.VideoCapture, n: int = 1) -> Optional[np.ndarray]:
 
 col_btn1, col_btn2, col_btn3, col_btn4 = st.columns([1, 1, 1, 2])
 with col_btn1:
-    if st.button("Open stream", use_container_width=True, type="primary"):
+    if st.button("Open stream", width='stretch', type="primary"):
         if cap is not None:
             try:
                 cap.release()
@@ -294,7 +294,7 @@ fps = float(st.session_state.get("an_fps", 25.0))
 
 with col_btn2:
     next_disabled = cap is None
-    if st.button("Next frame", use_container_width=True, disabled=next_disabled):
+    if st.button("Next frame", width='stretch', disabled=next_disabled):
         f = _read_next(cap, 1)
         if f is not None:
             st.session_state["an_frame"] = f
@@ -303,7 +303,7 @@ with col_btn2:
             st.warning("End of stream reached.")
 with col_btn3:
     skip30_disabled = cap is None
-    if st.button("Skip 30 s", use_container_width=True, disabled=skip30_disabled):
+    if st.button("Skip 30 s", width='stretch', disabled=skip30_disabled):
         f = _read_next(cap, int(30 * fps))
         if f is not None:
             st.session_state["an_frame"] = f
@@ -312,7 +312,7 @@ with col_btn3:
             st.warning("End of stream reached.")
 with col_btn4:
     skip60_disabled = cap is None
-    if st.button("Skip 60 s", use_container_width=True, disabled=skip60_disabled):
+    if st.button("Skip 60 s", width='stretch', disabled=skip60_disabled):
         f = _read_next(cap, int(60 * fps))
         if f is not None:
             st.session_state["an_frame"] = f
@@ -475,14 +475,14 @@ else:
                 txt = f"{i} {label}  —"
             if st.button(
                 txt, key=f"an_re_{i}",
-                use_container_width=True,
+                width='stretch',
                 disabled=not placed and i != st.session_state["an_next_point"],
             ):
                 if placed:
                     st.session_state["an_replace_idx"] = i
                     st.rerun()
 
-        if st.button("Reset all", use_container_width=True):
+        if st.button("Reset all", width='stretch'):
             st.session_state["an_points"] = []
             st.session_state["an_next_point"] = 0
             st.session_state["an_replace_idx"] = None
@@ -491,7 +491,7 @@ else:
         save_disabled = len(points) < 6
         if st.button(
             "Save calibration",
-            use_container_width=True,
+            width='stretch',
             type="primary",
             disabled=save_disabled,
         ):
@@ -633,7 +633,7 @@ if foreign_running:
     with kill_col:
         if st.button(
             f"Kill PID {foreign_pid}" if foreign_pid else "Kill running run",
-            use_container_width=True,
+            width='stretch',
             type="primary",
             disabled=foreign_pid is None,
         ):
@@ -667,7 +667,7 @@ if foreign_running:
             st.rerun()
     with force_col:
         if st.button(
-            "Delete stale lock", use_container_width=True,
+            "Delete stale lock", width='stretch',
             help="Use this if the lock looks stale but no process actually owns it.",
         ):
             try:
@@ -728,7 +728,7 @@ with col_run:
     if st.button(
         "Start analysis",
         type="primary",
-        use_container_width=True,
+        width='stretch',
         disabled=running or not cal_ready or foreign_running,
     ):
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -765,7 +765,7 @@ with col_run:
 
 with col_stop:
     if st.button(
-        "Stop", use_container_width=True, disabled=not running,
+        "Stop", width='stretch', disabled=not running,
     ):
         if proc is not None:
             try:
@@ -790,7 +790,7 @@ def _render_snapshot(path: Path, caption: str) -> None:
     except OSError:
         st.caption(f"_{caption} \u2014 (file busy, retrying)_")
         return
-    st.image(data, caption=caption, use_container_width=True)
+    st.image(data, caption=caption, width='stretch')
 
 
 @st.fragment(run_every=0.3 if running else None)

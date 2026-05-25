@@ -197,7 +197,7 @@ else:
         visible[["track_id", "Team", "seen_s", "distance_m",
                  "top_speed_ms", "Assigned to"]],
         hide_index=True,
-        use_container_width=True,
+        width='stretch',
         height=420,
         disabled=["track_id", "Team", "seen_s", "distance_m", "top_speed_ms"],
         column_config={
@@ -291,7 +291,7 @@ if positions and players_flat:
             )
             if cols[4].button("Accept", key=f"merge_accept_{a}_{b}",
                               disabled=(target == "(skip)"),
-                              use_container_width=True):
+                              width='stretch'):
                 roster["assignments"][str(a)] = target
                 roster["assignments"][str(b)] = target
                 save_roster(roster_path, roster)
@@ -310,7 +310,7 @@ st.markdown("### 3\u2002\u00b7\u2002Save \u0026 preview")
 
 save_col, _ = st.columns([1, 4])
 with save_col:
-    if st.button("Save roster", type="primary", use_container_width=True):
+    if st.button("Save roster", type="primary", width='stretch'):
         save_roster(roster_path, roster)
         st.toast(f"Saved {roster_path.name}", icon=":material/save:")
         # Force the Viewer's cached load to pick up the new mtime.
@@ -332,7 +332,7 @@ if roster.get("assignments"):
 
     st.dataframe(
         agg,
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         height=320,
         column_config={

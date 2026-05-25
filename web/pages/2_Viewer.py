@@ -389,7 +389,7 @@ with tab_overview:
             )
             fig.update_traces(texttemplate="%{text:.0f} m", textposition="outside")
             styled_plot(fig, height=320, showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
         with col_b:
             st.markdown("##### Possession share")
@@ -417,7 +417,7 @@ with tab_overview:
                 )
                 fig.update_traces(textinfo="label+percent")
                 styled_plot(fig, height=320, showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
         st.divider()
         st.markdown("##### Top-speed leaderboard")
@@ -444,7 +444,7 @@ with tab_overview:
         fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
         fig.update_yaxes(autorange="reversed", type="category")
         styled_plot(fig, height=320)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +482,7 @@ with tab_players:
         )
         st.dataframe(
             display_df,
-            use_container_width=True,
+            width='stretch',
             height=320,
             hide_index=True,
             column_config={
@@ -591,7 +591,7 @@ with tab_players:
                 margin=dict(l=40, r=40, t=20, b=20),
                 legend=dict(orientation="h", yanchor="bottom", y=-0.15),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
 
 # ---------------------------------------------------------------------------
@@ -669,7 +669,7 @@ with tab_heatmaps:
         if mode == "All players":
             st.plotly_chart(
                 _heatmap(positions_df, "All on-pitch positions"),
-                use_container_width=True,
+                width='stretch',
             )
         elif mode == "Per team":
             cols = st.columns(2, gap="medium")
@@ -679,7 +679,7 @@ with tab_heatmaps:
                     if team_df.empty:
                         st.info(f"No data for {TEAM_LABEL[team_id]}.")
                     else:
-                        st.plotly_chart(_heatmap(team_df, TEAM_LABEL[team_id]), use_container_width=True)
+                        st.plotly_chart(_heatmap(team_df, TEAM_LABEL[team_id]), width='stretch')
         else:
             st.caption(
                 "Per-track heatmaps reflect one continuous detection window. "
@@ -688,7 +688,7 @@ with tab_heatmaps:
             player_ids = sorted(positions_df["id"].unique().tolist())
             selected = st.selectbox("Track", player_ids, format_func=lambda i: f"#{int(i)}")
             player_df = positions_df[positions_df["id"] == selected]
-            st.plotly_chart(_heatmap(player_df, f"Track #{int(selected)}"), use_container_width=True)
+            st.plotly_chart(_heatmap(player_df, f"Track #{int(selected)}"), width='stretch')
 
 
 # ---------------------------------------------------------------------------
@@ -721,7 +721,7 @@ with tab_replay:
         )
         styled_plot(fig, height=120, margin=dict(l=20, r=20, t=10, b=20))
         fig.update_yaxes(visible=False)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         # Estimate the source video's effective fps from the JSONL timestamps.
         # Falls back to 25 if we can't infer it (e.g. fewer than 2 frames).
@@ -735,11 +735,11 @@ with tab_replay:
         with col_c1:
             if st.button(
                 "Pause" if st.session_state["replay_playing"] else "Play",
-                use_container_width=True,
+                width='stretch',
             ):
                 st.session_state["replay_playing"] = not st.session_state["replay_playing"]
         with col_c2:
-            if st.button("Reset", use_container_width=True):
+            if st.button("Reset", width='stretch'):
                 st.session_state["replay_idx"] = 0
                 st.session_state["replay_playing"] = False
         with col_speed:
@@ -794,7 +794,7 @@ with tab_replay:
             board_drawer = TacticalBoard(DEFAULT_BOARD_W, DEFAULT_BOARD_H)
             img = board_drawer.draw_state(players, ball)
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            st.image(img_rgb, use_container_width=True)
+            st.image(img_rgb, width='stretch')
             st.caption(
                 f"Frame **{record['frame']}** &middot; t = **{record['t']:.2f}s** "
                 f"&middot; {len(players)} track(s) &middot; "
@@ -815,7 +815,7 @@ with tab_replay:
                         for pid, pos, team in players
                     ]
                 )
-                st.dataframe(tbl, use_container_width=True, height=320, hide_index=True)
+                st.dataframe(tbl, width='stretch', height=320, hide_index=True)
             else:
                 st.caption("_No tracks visible._")
 
