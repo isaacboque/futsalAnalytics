@@ -154,6 +154,155 @@ streamlit run web/app.py
 The sidebar nav switches between Home / Analyse / Viewer. See
 [`web/README.md`](web/README.md) for the full workflow and file layout.
 
+## Technical Details
+
+### Core Algorithms & Formulas
+
+#### **Perspective Transformation (6-Point Homography)**
+
+A homography is a 3×3 projective transformation matrix **H** that maps camera-space coordinates to tactical board coordinates:
+
+```
+src = field_rect[:6]  # [TL, CT, TR, BR, CB, BL] in camera space
+dst = np.array([
+    [0, 0],                    # TL
+    [width/2, 0],              # CT (halfway line)
+    [width, 0],                # TR
+    [width, height],           # BR
+    [width/2, height],         # CB (halfway line)
+    [0, height]                # BL
+])
+H, _ = cv2.findHomography(src, dst, method=0)  # least-squares
+```
+
+**Why 6 points instead of 4?**
+- 4-corner perspective assumes straight lines remain straight (pure perspective).
+- 6-point homography is more general and better captures camera distortion.
+- Halfway-line points (CT, CB) constrain mid-pitch geometry → more accurate.
+
+**Coordinate System:**
+- **Camera space:** Video frame (0 → 1920 pixels typical)
+- **Board space:** 700 × 350 pixels (40 m × 20 m futsal pitch at 2:1 aspect ratio)
+
+#### **Point-in-Polygon Field Validation**
+
+Uses ray casting + OpenCV `pointPolygonTest()` with dual validation:
+
+1. **Fast axis-aligned bounding box pre-filter**
+2. **Expensive point-in-polygon test (only if bbox passes)**
+
+A player detection is kept if **either** foot position **or** bounding-box centroid is inside the polygon.
+
+#### **Team Classification via K-Means Clustering**
+
+Assigns players to teams based on jersey color in HSV space (more robust to lighting than RGB).
+
+**Feature Extraction:**
+1. Crop upper 40% of player bounding box (jersey region)
+2. Convert BGR → HSV
+3. Filter by saturation: Keep pixels with S > 30 (colored, not grayscale)
+4. Compute mean HSV feature vector
+
+**K-Means partitions into 3 clusters:**
+- **Clusters 0 & 1:** Teams A and B (largest clusters)
+- **Cluster 2 (smallest):** Referee
+
+```python
+from sklearn.cluster import KMeans
+features = np.array([get_jersey_hsv(frame, bbox) for bbox in detections])
+kmeans = KMeans(n_clusters=3, n_init=20, random_state=42)
+kmeans.fit(features)
+labels = kmeans.predict(features)
+ref_label = np.argmin(np.bincount(labels))  # referee = smallest cluster
+```
+
+#### **PlayerTracker: Hungarian Assignment (Greedy Variant)**
+
+Maintains persistent player IDs across frames using:
+
+1. **Cost Matrix:** Euclidean distances between predicted track positions and new detections
+2. **Velocity Prediction:** Extrapolates position using previous velocity
+3. **Greedy Hungarian:** Sorts pairs by cost, assigns if both unassigned, rejects if cost > 150 pixels
+4. **Smoothing:** Exponential moving average (α = 0.6) on positions
+5. **Track Lifecycle:** Creation on unmatched detection, persistence for 10 frames, deletion if unmatched for 10+ frames
+
+#### **BallTracker: Kalman Filter**
+
+Smooths ball position and predicts during occlusion using 1D Kalman filter per axis.
+
+**State:** [x, y, vx, vy] (position + velocity in 2D board space)
+
+**Prediction step:**
+```
+x_pred = x_{t-1} + v_{t-1} * Δt
+p_pred = p_{t-1} + q  (q = 0.01 process noise)
+```
+
+**Correction step (if measurement available):**
+```
+y = z - x_pred           (residual)
+s = p_pred + r           (innovation covariance, r = 4.0 measurement noise)
+k = p_pred / s           (Kalman gain)
+x_corrected = x_pred + k * y
+p_corrected = (1 - k) * p_pred
+```
+
+**No-Detection Handling:** Predicts up to 5 frames without detection; resets if discontinuity > 150 pixels.
+
+#### **KPI Calculations (in metres)**
+
+**Pixel-to-Metre Conversion:**
+```
+m_per_px_x = 40 m / 700 px ≈ 0.0571 m/px
+m_per_px_y = 20 m / 350 px ≈ 0.0571 m/px
+```
+
+**Distance Covered:**
+```
+d_total = Σ ||p_t - p_{t-1}||_2
+```
+Anomaly filtering: Skip if step distance > 10 m (impossible sprint).
+
+**Top Speed:**
+```
+v_max = max_t (||p_t - p_{t-1}||_2 / Δt)
+```
+where Δt = 1/fps (frame duration in seconds).
+
+**Sprint Count:**
+```
+sprint_count = # transitions from v < 5.0 m/s to v ≥ 5.0 m/s
+```
+Default threshold: 5.0 m/s (typical futsal sprint).
+
+**Possession:**
+```
+possession_time = Σ 1[closest_to_ball AND d < 1.5m] / fps
+```
+
+**Duel Time:**
+```
+duel_time = Σ 1[within 1.5m of opposing_team_player] / fps
+```
+
+### Pitch Specifications
+
+- **Physical dimensions:** 40 m × 20 m (FIFA futsal standard)
+- **Board rendering:** 700 × 350 pixels (2:1 aspect ratio)
+- **Markings:** D-shaped penalty areas (6m quarter-circles), 3m centre circle, 6m/10m marks, halfway line
+
+### Module Map
+
+| Module | Purpose | Algorithm |
+|--------|---------|-----------|
+| `stream.py` | YouTube stream extraction | yt-dlp wrapper + OpenCV |
+| `calibration.py` | Interactive 6-point calibration | Tkinter UI |
+| `field.py` | Field validation & mapping | Point-in-polygon + homography |
+| `detection.py` | YOLO inference, team classification | YOLOv11 + K-Means |
+| `board.py` | Pitch rendering | OpenCV drawing + FIFA spec |
+| `kpis.py` | Per-player metrics | Euclidean distance + statistics |
+| `config.py` | Central configuration | Dataclass |
+
 ## Output formats
 
 ### KPIs CSV (`--save-kpis`)
