@@ -1,0 +1,30 @@
+# Futsal YOLO Dataset Configuration
+# Copy this file to your dataset directory and update paths
+
+# Absolute path to dataset root directory
+path: /path/to/your/futsal_dataset
+
+# Train/val split directories (relative to 'path' above)
+train: images/train
+val: images/val
+
+# (Optional) Test split
+# test: images/test
+
+# Number of classes
+# Use 80 for COCO format (person=0, ball=32 as default)
+# Or define custom number if using subset
+nc: 80
+
+# Class names (index order must match annotations)
+# COCO format example:
+names:
+  0: person        # players
+  # ... other COCO classes ...
+  32: sports ball  # ball (if using COCO format)
+
+# Alternative for custom futsal-only dataset:
+# nc: 2
+# names:
+#   0: player
+#   1: ball
