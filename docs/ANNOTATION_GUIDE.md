@@ -130,7 +130,7 @@ futsal_dataset/
 Once trained, update your config:
 ```python
 config = Config(
-    model_name="runs/detect/futsal_train/weights/best.pt",
+    model_name="runs/detect/runs/detect/futsal_train-7/weights/best.pt",
     yolo_conf_threshold=0.3
 )
 ```

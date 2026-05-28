@@ -152,15 +152,15 @@ python scripts/train.py --data futsal_dataset/futsal_data.yaml \
 
 ## Results
 
-After training, best model saved to: `runs/detect/futsal_train/weights/best.pt`
+After training, best model saved to: `runs/detect/runs/detect/futsal_train-7/weights/best.pt`
 
-View training plots: `runs/detect/futsal_train/results.png`
+View training plots: `runs/detect/runs/detect/futsal_train-7/results.png`
 
 ## Using Trained Model
 
 ```python
 from ultralytics import YOLO
 
-model = YOLO("runs/detect/futsal_train/weights/best.pt")
+model = YOLO("runs/detect/runs/detect/futsal_train-7/weights/best.pt")
 results = model("video.mp4", conf=0.3)
 ```

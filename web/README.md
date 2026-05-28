@@ -22,6 +22,12 @@ This pulls in `streamlit`, `plotly`, `pandas`, and
 streamlit run web/app.py
 ```
 
+For local-network access, use:
+
+```bash
+streamlit run web/app.py --server.address 0.0.0.0 --server.port 8501
+```
+
 A browser tab opens. Use the **sidebar nav** to move between Home / Analyse /
 Viewer.
 

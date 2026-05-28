@@ -148,7 +148,7 @@ A three-page Streamlit app:
 
 ```bash
 pip install -e ".[viewer]"
-streamlit run web/app.py
+streamlit run web/app.py --server.address 0.0.0.0 --server.port 8501
 ```
 
 The sidebar nav switches between Home / Analyse / Viewer. See

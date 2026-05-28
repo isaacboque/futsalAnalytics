@@ -1,0 +1,9 @@
+# futsal_dataset - Auto-generated YOLO config
+path: C:\Users\isboq\OneDrive\Escriptori\IAFS\futsal_dataset
+train: images/train
+val: images/val
+
+nc: 80
+names:
+  0: person
+  32: sports ball

@@ -165,7 +165,7 @@ python scripts/train.py --data futsal_dataset/futsal_dataset.yaml --resume
 
 **Training output:**
 ```
-runs/detect/futsal_train/
+runs/detect/runs/detect/futsal_train-7/
 ├── weights/
 │   ├── best.pt       ← Your trained model
 │   └── last.pt
@@ -181,7 +181,7 @@ Update your code to use the new model:
 from ultralytics import YOLO
 
 # Use your trained model instead of yolo11n.pt
-model = YOLO("runs/detect/futsal_train/weights/best.pt")
+model = YOLO("runs/detect/runs/detect/futsal_train-7/weights/best.pt")
 
 # Detect in video or image
 results = model("my_video.mp4", conf=0.3)
@@ -193,7 +193,7 @@ Or update config:
 from futsal_analytics.config import Config
 
 config = Config(
-    model_name="runs/detect/futsal_train/weights/best.pt",
+    model_name="runs/detect/runs/detect/futsal_train-7/weights/best.pt",
     yolo_conf_threshold=0.3
 )
 ```

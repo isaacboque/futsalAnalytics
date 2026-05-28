@@ -7,8 +7,11 @@ textColor = "#d4d4d8"
 font = "sans serif"
 
 [server]
-headless = false
+headless = true
 runOnSave = true
+address = "0.0.0.0"
+port = 8501
+enableCORS = false
 
 [browser]
 gatherUsageStats = false

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Config:
     """Configuración centralizada del sistema de análisis."""
-    model_name: str = "yolo11n.pt"
+    model_name: str = "runs/detect/runs/detect/futsal_train-7/weights/best.pt"
     board_width: int = 700
     board_height: int = 350
     

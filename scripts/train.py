@@ -180,6 +180,7 @@ def train(
             # Optimization
             close_mosaic=10,  # Stop mosaic augmentation near end
             mosaic=1.0,       # 100% mosaic augmentation (good for small objects like ball)
+            workers=0,        # Disable multiprocessing to avoid pagefile issues on Windows
             
             # Regularization
             dropout=0.0,
@@ -202,13 +203,27 @@ def train(
         if hasattr(results, 'best_fitness'):
             logger.info(f"Best fitness: {results.best_fitness:.4f}")
         
-        best_model_path = Path(project) / name / "weights" / "best.pt"
-        if best_model_path.exists():
-            logger.info(f"✓ Best model saved: {best_model_path.absolute()}")
-            return best_model_path
-        else:
-            logger.warning(f"Could not find best model at {best_model_path}")
-            return None
+        # Find the best model - ultralytics creates nested project structure
+        # Try the results save_dir first (most reliable)
+        if hasattr(results, 'save_dir'):
+            best_model_path = Path(results.save_dir) / "weights" / "best.pt"
+            if best_model_path.exists():
+                logger.info(f"✓ Best model saved: {best_model_path.absolute()}")
+                return best_model_path
+        
+        # Fallback: search for latest trained model in project directory
+        project_path = Path(project)
+        if project_path.exists():
+            # Find all best.pt files and get the latest one
+            best_models = list(project_path.glob("**/weights/best.pt"))
+            if best_models:
+                # Sort by modification time and get the newest
+                latest_model = max(best_models, key=lambda p: p.stat().st_mtime)
+                logger.info(f"✓ Best model found: {latest_model.absolute()}")
+                return latest_model
+        
+        logger.warning(f"Could not find best model in {project_path}")
+        return None
             
     except Exception as e:
         logger.error(f"Training failed: {e}", exc_info=True)

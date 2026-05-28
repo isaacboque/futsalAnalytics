@@ -1,6 +1,7 @@
 """Central configuration for the futsal analytics system."""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -13,7 +14,7 @@ class Config:
     metres-per-pixel scale.
     """
 
-    model_name: str = "yolo11n.pt"
+    model_name: str = "runs/detect/runs/detect/futsal_train-7/weights/best.pt"
     board_width: int = 700
     board_height: int = 350
 
@@ -29,6 +30,11 @@ class Config:
     yt_dlp_timeout: int = 30
 
     def __post_init__(self) -> None:
+        if not Path(self.model_name).is_absolute():
+            candidate = Path(__file__).resolve().parents[2] / self.model_name
+            if candidate.exists():
+                self.model_name = str(candidate)
+
         if self.board_width <= 0 or self.board_height <= 0:
             raise ValueError("Board dimensions must be positive")
         if self.min_players_for_kmeans < 2:

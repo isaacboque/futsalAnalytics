@@ -45,6 +45,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+st.info(
+    "Streamlit is ready to run. Use `streamlit run web/app.py`, or for network access: "
+    "`streamlit run web/app.py --server.address 0.0.0.0 --server.port 8501`."
+)
+
 
 c1, c2 = st.columns(2, gap="large")
 
