@@ -307,25 +307,29 @@ class TeamClassifier:
         return frame[y1:y2, x1:x2]
 
     def get_jersey_color_features(self, frame: np.ndarray, bbox: np.ndarray) -> np.ndarray:
-        """Extraer características de color HSV de la camiseta."""
+        """Extraer características de color [sin_H, cos_H, S, V] de la camiseta.
+
+        Hue se codifica como (sin, cos) para evitar el problema de wraparound del rojo:
+        en HSV de OpenCV, el rojo aparece tanto cerca de H=0 como de H=180, por lo que
+        la media aritmética de H puede caer en ~90 (verde), rompiendo el clustering.
+        """
         x1, y1, x2, y2 = map(int, bbox)
         jersey_h = int((y2 - y1) * 0.4)
         crop = self._safe_crop(frame, x1, y1, x2, y1 + jersey_h)
-        
+
         if crop.size == 0:
-            return np.array([0, 0, 0], dtype=np.float32)
-        
+            return np.zeros(4, dtype=np.float32)
+
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV).astype(np.float32)
-        saturation_mask = hsv[:, :, 1] > 30
-        
-        if saturation_mask.sum() < 5:
-            return np.mean(hsv, axis=(0, 1)).astype(np.float32)
-        
-        filtered_hsv = hsv[saturation_mask]
-        features = np.mean(filtered_hsv, axis=0).astype(np.float32)
-        features[0] = np.clip(features[0], 0, 180)
-        
-        return features
+        sat_mask = hsv[:, :, 1] > 30
+        pixels = hsv[sat_mask] if sat_mask.sum() >= 5 else hsv.reshape(-1, 3)
+
+        hue_rad = pixels[:, 0] * (np.pi / 90.0)  # H ∈ [0,180] → ángulo ∈ [0, 2π]
+        return np.array(
+            [np.mean(np.sin(hue_rad)), np.mean(np.cos(hue_rad)),
+             np.mean(pixels[:, 1]), np.mean(pixels[:, 2])],
+            dtype=np.float32,
+        )
 
     def train_teams(self, frame: np.ndarray, detections, config: Config) -> bool:
         """Entrenar clasificador K-Means en colores de camiseta."""
