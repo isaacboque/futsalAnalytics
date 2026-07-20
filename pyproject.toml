@@ -3,14 +3,15 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "futsal-analytics"
-version = "0.1.0"
-description = "Real-time futsal match analysis from YouTube streams using YOLO and OpenCV"
+name = "iafs"
+version = "0.2.0"
+description = "IAFS: futsal analytics tools — futsal-analytics (legacy) + PivotIQ (automated moment-intelligence)"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Isaac Boque", email = "isboque19@gmail.com" }]
 dependencies = [
+    # --- existing futsal-analytics deps ---
     "opencv-python",
     "ultralytics",
     # supervision 0.30 removes the top-level sv.ByteTrack alias used by
@@ -19,6 +20,16 @@ dependencies = [
     "scikit-learn",
     "yt-dlp",
     "numpy",
+    # --- PivotIQ deps ---
+    "pydantic>=2.0",
+    "typer>=0.9",
+    "rich>=13.0",
+    "filterpy>=1.4",
+    "ffmpeg-python>=0.2",
+    "matplotlib>=3.7",
+    "pandas>=2.0",
+    # tomllib is stdlib in Python 3.11+; tomli is the backport for 3.10
+    'tomli>=2.0; python_version < "3.11"',
 ]
 
 [project.optional-dependencies]
@@ -26,16 +37,19 @@ dev = ["pytest"]
 viewer = [
     "streamlit>=1.32",
     "plotly>=5.18",
-    "pandas>=2.0",
     "streamlit-image-coordinates>=0.1.6",
 ]
 
 [project.scripts]
 futsal-analytics = "futsal_analytics.__main__:main"
 futsal-calibrate  = "futsal_analytics.calibration:run_standalone"
+pivotiq           = "pivotiq.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
 
 [tool.ruff]
 line-length = 110
