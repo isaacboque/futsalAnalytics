@@ -1,0 +1,27 @@
+# Ultralytics YOLO dataset config — futsal ball detector
+#
+# Labelling guide
+# ---------------
+# Label ONE class: "ball" (class 0).
+# Minimum viable dataset: 400 frames covering:
+#   - ball in open play (various distances from camera)
+#   - ball near lines / boards
+#   - partial occlusions (by player feet, defender)
+#   - blurred / motion-smeared ball
+#   - frames where the ball is NOT visible (negative examples)
+# Recommended tool: Roboflow (export in YOLOv8 format).
+#
+# Expected label stats after augmentation:
+#   train ≥ 1 200 images   val ≥ 200 images
+#
+# Download your Roboflow export and unzip into  data/ball_detector/
+# before running training/ball_detector/train.py
+
+path: data/ball_detector       # root relative to repo root
+train: images/train
+val: images/val
+test: images/test              # optional
+
+nc: 1
+names:
+  0: ball
