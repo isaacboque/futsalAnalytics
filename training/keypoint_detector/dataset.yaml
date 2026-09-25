@@ -1,0 +1,47 @@
+# Ultralytics YOLO-Pose dataset config — futsal pitch keypoint detector
+#
+# The model predicts WHICH of the 29 canonical pitch landmarks are visible in
+# a given camera frame, and their pixel coordinates.  Because this is a
+# follow-cam feed, only a subset of landmarks will be visible per frame.
+#
+# Class: ONE class — "pitch" (the entire pitch is treated as one object whose
+# "skeleton" consists of the 29 landmark keypoints).
+#
+# Keypoint ordering matches pivotiq.geometry.KEYPOINT_NAMES exactly:
+#   0  corner_tl          7  center_circle_t    14 left_arc_t
+#   1  corner_bl          8  center_circle_b    15 left_arc_b
+#   2  corner_tr          9  center_circle_l    16 right_post_t
+#   3  corner_br         10  center_circle_r    17 right_post_b
+#   4  halfway_t         11  left_post_t        18 right_penalty_6m
+#   5  halfway_b         12  left_post_b        19 right_penalty_10m
+#   6  center            13  left_penalty_6m    20 right_arc_t
+#                            (cont.)            21 right_arc_b
+#                                               22 sub_zone_near_b
+#                                               23 sub_zone_far_b
+#                                               24 sub_zone_near_t
+#                                               25 sub_zone_far_t
+#                                               26 left_goal_centre
+#                                               27 right_goal_centre
+#                                               28 left_penalty_10m
+#
+# Labelling guide
+# ---------------
+# - Annotate each visible landmark with its pixel coordinate.
+# - Mark occluded / out-of-frame landmarks with visibility flag = 0.
+# - Minimum viable dataset: 500 frames (diverse pan/zoom states).
+# - Recommended: balance close-up (few landmarks visible) vs. wide shots.
+# - Recommended tool: Roboflow with Pose template; export YOLOv8-Pose format.
+#
+# After export, unzip into  data/keypoint_detector/
+
+path: data/keypoint_detector
+train: images/train
+val: images/val
+test: images/test
+
+nc: 1
+names:
+  0: pitch
+
+kpt_shape: [29, 3]   # [num_keypoints, (x, y, visibility)]
+flip_idx: []         # symmetric pairs — handled in augmentation instead
