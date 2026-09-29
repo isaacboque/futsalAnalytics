@@ -64,18 +64,20 @@ class TestBallTracker:
 
 
 class TestTeamClassifierColorFeatures:
-    def test_returns_three_element_vector(self, synthetic_frame):
+    def test_returns_four_element_vector(self, synthetic_frame):
         tc = TeamClassifier()
         bbox = np.array([10, 10, 60, 80], dtype=np.float32)
         features = tc.get_jersey_color_features(synthetic_frame, bbox)
-        assert features.shape == (3,)
+        assert features.shape == (4,)
         assert features.dtype == np.float32
 
     def test_empty_crop_returns_zeros(self, synthetic_frame):
         tc = TeamClassifier()
         bbox = np.array([10, 10, 10, 10], dtype=np.float32)
         features = tc.get_jersey_color_features(synthetic_frame, bbox)
-        np.testing.assert_array_equal(features, [0, 0, 0])
+        # Degenerate crop collapses to a single black pixel (H=0, S=0, V=0).
+        # H=0 encodes as (sin, cos) = (0, 1), not (0, 0).
+        np.testing.assert_array_equal(features, [0, 1, 0, 0])
 
     def test_predict_team_before_training_returns_zero(self, synthetic_frame):
         tc = TeamClassifier()
