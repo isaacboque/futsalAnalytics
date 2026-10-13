@@ -2,51 +2,57 @@
 
 [![tests](https://github.com/isaacboque/futsalAnalytics/actions/workflows/tests.yml/badge.svg)](https://github.com/isaacboque/futsalAnalytics/actions/workflows/tests.yml)
 
-Real-time futsal match analysis from YouTube streams.
-YOLO detection + ByteTrack persistent IDs + HSV team clustering +
-6-point perspective mapping + per-player KPIs.
+**Open-source pipeline that turns futsal match footage into per-player KPIs — no specialist hardware.**
 
-## Features
+Built as the technical core of a bachelor's thesis (UAB), *"Breaking the Data Deadlock: An
+End-to-End AI Pipeline to Introduce Data Culture in Futsal"*. Point it at a YouTube stream or a
+local video, calibrate the pitch once, and get an annotated video, a tactical board, per-frame
+positions and a per-player KPI table.
 
-- **YOLO11 detection** of players and ball from a YouTube stream
-- **Interactive 6-point field calibration** — drag handles to fit any side-camera angle
-- **6-point homography** (`cv2.findHomography`) — uses halfway-line points as additional
-  constraints for a more accurate camera → board mapping than a 4-corner perspective
-- **ByteTrack persistent IDs** — same player keeps the same `track_id` across frames
-- **Team classification** via K-Means on HSV jersey colours; optional periodic re-training
-  to adapt to lighting changes
-- **FIFA-spec futsal pitch** rendering on the tactical board (D-shaped penalty areas,
-  6 m / 10 m marks, 3 m centre circle)
-- **Per-player KPIs**: distance covered (m), top speed (m/s), sprint count,
+## The problem
+
+The thesis started with six interviews with Spanish futsal professionals. The finding was
+consistent: everyone knew what they wanted to measure, but nobody had the infrastructure to
+measure it. This project asks how far ordinary camera footage can go.
+
+## What it does
+
+- Detects players and the ball with **YOLO11** from a YouTube stream or local video
+- Maps the camera view onto a top-down tactical board with an **interactive 6-point
+  homography** (halfway-line points add constraints over a plain 4-corner mapping)
+- Keeps **persistent player IDs** with ByteTrack, and smooths the ball track
+- Separates **teams and referee** with K-Means on HSV jersey colours (optional periodic re-training)
+- Renders a **FIFA-spec futsal pitch** (D-shaped penalty areas, 6 m / 10 m marks, 3 m centre circle)
+- Computes **per-player KPIs**: distance covered (m), top speed (m/s), sprint count,
   possession (s), duel time (s)
-- **Outputs**: annotated MP4 video, per-frame positions JSONL, per-player KPIs CSV
-- **Headless mode** for batch / CI usage
-- **GPU acceleration** via `--device cuda` (auto-detected by default)
+- Writes an annotated MP4, a per-frame positions JSONL and a per-player KPIs CSV; runs headless
+  for batch / CI use; uses the GPU with `--device cuda` (auto-detected by default)
+- Ships a three-page Streamlit app (Analyse, Viewer, Roster) on top of the CLI
 
 ## Pipeline
 
-```
-YouTube URL
-    │
-    ▼
-open_youtube_stream()              stream.py
-    │
-    ▼
-calibration (UI or .npy file)      calibration.py
-    │
-    ├── FieldValidator              field.py        polygon filter
-    └── SimpleFieldMapper           field.py        6-point homography
-    │
-    ▼
-process_frame()                    detection.py
-    ├── YOLO predict
-    ├── size + polygon filter
-    ├── ByteTrack assign IDs
-    ├── TeamClassifier              detection.py    K-Means on HSV
-    ├── BallTracker                 detection.py    temporal smoothing
-    ├── KPITracker.update()         kpis.py
-    └── TacticalBoard.draw_state()  board.py
-```
+1. **Stream**: open a YouTube URL (yt-dlp) or a local file (`stream.py`)
+2. **Calibration**: 6 points on the pitch boundary, via UI or a saved `.npy` (`calibration.py`)
+3. **Field mapping**: polygon filter + 6-point homography, camera to board (`field.py`)
+4. **Detection**: YOLO11 predict, then size and polygon filters (`detection.py`)
+5. **Tracking**: ByteTrack IDs for players, temporal smoothing for the ball (`detection.py`)
+6. **Team classification**: K-Means on HSV jersey colours (`detection.py`)
+7. **KPIs and output**: five KPIs per player, tactical board, video / JSONL / CSV (`kpis.py`, `board.py`)
+
+## Results
+
+No benchmark numbers are published in this repository. What is verified: the test suite
+(`pytest tests/`) runs in CI on Python 3.10 / 3.11 / 3.12, and the pipeline runs end to end
+on YouTube-resolution futsal footage, headless and in the web app.
+
+## Limitations and next steps
+
+- Player IDs can swap under occlusion; the KPI step caps per-frame speed to filter the worst jumps.
+- The ball is small and fast at YouTube resolution, so ball detection is unreliable.
+- A single static side camera is assumed; calibration is manual (6 points per camera angle).
+- This repository is the closed thesis-phase baseline. The follow-up, a rebuild for broadcast
+  footage focused on set pieces with ball tracking as a hard requirement, lives in separate
+  repositories.
 
 ## Installation
 
@@ -216,9 +222,10 @@ labels = kmeans.predict(features)
 ref_label = np.argmin(np.bincount(labels))  # referee = smallest cluster
 ```
 
-#### **PlayerTracker: Hungarian Assignment (Greedy Variant)**
+#### **PlayerTracker: Hungarian Assignment (Greedy Variant), thesis-era**
 
-Maintains persistent player IDs across frames using:
+The current pipeline assigns player IDs with ByteTrack (see `detection.py`); this is the
+earlier tracker design from the thesis. Maintains persistent player IDs across frames using:
 
 1. **Cost Matrix:** Euclidean distances between predicted track positions and new detections
 2. **Velocity Prediction:** Extrapolates position using previous velocity
