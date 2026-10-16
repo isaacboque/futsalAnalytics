@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "ruff"]
 viewer = [
     "streamlit>=1.32",
     "plotly>=5.18",
@@ -36,6 +36,11 @@ futsal-calibrate  = "futsal_analytics.calibration:run_standalone"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Always import this tree's src/, even if another checkout is pip-installed editable.
+pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 110
