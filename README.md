@@ -233,28 +233,15 @@ earlier tracker design from the thesis. Maintains persistent player IDs across f
 4. **Smoothing:** Exponential moving average (α = 0.6) on positions
 5. **Track Lifecycle:** Creation on unmatched detection, persistence for 10 frames, deletion if unmatched for 10+ frames
 
-#### **BallTracker: Kalman Filter**
+#### **BallTracker: rolling-average smoother**
 
-Smooths ball position and predicts during occlusion using 1D Kalman filter per axis.
+`BallTracker` (in `detection.py`) is a frame-to-frame smoother, not a motion model. An earlier
+design used a per-axis Kalman filter; **that filter is not part of the code in this repository**.
 
-**State:** [x, y, vx, vy] (position + velocity in 2D board space)
-
-**Prediction step:**
-```
-x_pred = x_{t-1} + v_{t-1} * Δt
-p_pred = p_{t-1} + q  (q = 0.01 process noise)
-```
-
-**Correction step (if measurement available):**
-```
-y = z - x_pred           (residual)
-s = p_pred + r           (innovation covariance, r = 4.0 measurement noise)
-k = p_pred / s           (Kalman gain)
-x_corrected = x_pred + k * y
-p_corrected = (1 - k) * p_pred
-```
-
-**No-Detection Handling:** Predicts up to 5 frames without detection; resets if discontinuity > 150 pixels.
+- Returns the mean of the last `history_size = 5` detected positions.
+- Clears its history when the ball is not detected in a frame, or when the position jumps more
+  than `max_distance = 100` px from the previous one.
+- Does not predict through missed detections: with no detection it returns `None`.
 
 #### **KPI Calculations (in metres)**
 
@@ -268,7 +255,7 @@ m_per_px_y = 20 m / 350 px ≈ 0.0571 m/px
 ```
 d_total = Σ ||p_t - p_{t-1}||_2
 ```
-Anomaly filtering: Skip if step distance > 10 m (impossible sprint).
+Anomaly filtering: a step whose speed is 10 m/s or more is dropped entirely (almost certainly an ID-swap jump).
 
 **Top Speed:**
 ```
@@ -303,7 +290,7 @@ duel_time = Σ 1[within 1.5m of opposing_team_player] / fps
 | Module | Purpose | Algorithm |
 |--------|---------|-----------|
 | `stream.py` | YouTube stream extraction | yt-dlp wrapper + OpenCV |
-| `calibration.py` | Interactive 6-point calibration | Tkinter UI |
+| `calibration.py` | Interactive 6-point calibration | OpenCV window UI |
 | `field.py` | Field validation & mapping | Point-in-polygon + homography |
 | `detection.py` | YOLO inference, team classification | YOLOv11 + K-Means |
 | `board.py` | Pitch rendering | OpenCV drawing + FIFA spec |
@@ -318,7 +305,7 @@ duel_time = Σ 1[within 1.5m of opposing_team_player] / fps
 |--------|-------------|
 | `track_id` | Persistent ByteTrack ID |
 | `team` | Team assignment (0, 1, or -1 for referee) |
-| `distance_m` | Total distance covered, in metres (capped per frame to filter ID-swap jumps) |
+| `distance_m` | Total distance covered, in metres (steps at 10 m/s or faster are discarded as ID-swap jumps) |
 | `top_speed_ms` | Peak per-frame speed, m/s |
 | `sprint_count` | Number of sprint events (≥ 5 m/s) |
 | `possession_s` | Seconds spent as nearest player to ball within 1.5 m |
@@ -357,9 +344,13 @@ for I/O paths.
 ## Running the tests
 
 ```bash
+python -m venv venv && venv\Scripts\activate    # or: source venv/bin/activate
 pip install -e ".[dev]"
-pytest tests/ -v
+pytest
 ```
+
+`pytest` is configured (`pyproject.toml`) to import this checkout's `src/`, so it tests this tree
+even if another copy of `futsal_analytics` is installed in the same environment.
 
 Tests cover `FieldCalibrator` (load/save), `FieldValidator`, the new
 6-point `SimpleFieldMapper`, `TeamClassifier`, `BallTracker`,
@@ -374,6 +365,8 @@ CI runs `pytest` on Python 3.10 / 3.11 / 3.12 against every push and PR.
 futsalAnalytics/
 ├── pyproject.toml
 ├── README.md
+├── LICENSE
+├── futsal_analyzer_v2.py   single-file earlier version of the analyser, kept as-is for reference
 ├── .github/workflows/tests.yml
 ├── .streamlit/config.toml
 ├── src/futsal_analytics/
@@ -409,7 +402,8 @@ futsalAnalytics/
 └── docs/
     ├── CALIBRATION.md
     ├── CHANGELOG.md
-    └── SAMPLE_VIDEOS.md
+    ├── SAMPLE_VIDEOS.md
+    └── *.docx              thesis documents (see the thesis title above)
 ```
 
 ## Troubleshooting
@@ -426,8 +420,8 @@ pip install --upgrade yt-dlp
 **KPIs look wrong (huge distances, impossible top speed)**
 - The board-pixel ↔ metres scale assumes a 40 m × 20 m pitch. If your pitch is
   significantly different, adjust `PITCH_WIDTH_M` / `PITCH_HEIGHT_M` in `board.py`.
-- Sudden ID swaps create jumps. The per-frame speed cap (12 m/s) filters
-  the most egregious ones; for stricter filtering, lower it in `kpis.py`.
+- Sudden ID swaps create jumps. Steps at 10 m/s or faster are discarded in `kpis.py`;
+  for stricter filtering, lower that limit there.
 
 **Live stream falls behind**
 - Use `--skip-when-behind 2.0` to drop frames when lag exceeds 2 s.
@@ -439,4 +433,4 @@ pip install --upgrade yt-dlp
 
 ## License
 
-MIT — see `pyproject.toml`.
+MIT — see [`LICENSE`](LICENSE).
